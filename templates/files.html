@@ -1,11 +1,10 @@
 {% extends "layout_app.html" %}
-{% block title %}Files · Torrent{% endblock %}
+{% block title %}Files · Vault{% endblock %}
 {% block page_heading %}Files{% endblock %}
+{% block page_sub %}<p class="page-sub">Everything on disk under your download folder — fetch via HTTP or delete to free space.</p>{% endblock %}
 {% block app_content %}
-<p class="intro-lead">Browse and download what landed in your download folder. Delete frees space immediately.</p>
-
 <main class="stack-main">
-  <section class="card card-pro files-browser">
+  <section class="card-pro files-browser">
     <div class="card-head">
       <h2 class="card-title">Browse</h2>
       {% if parent_path or current_path %}

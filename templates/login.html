@@ -1,10 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Sign in{% endblock %}
+{% block title %}Sign in · Vault{% endblock %}
 {% block body %}
 <div class="auth-wrap">
+  <div class="auth-backdrop" aria-hidden="true"></div>
   <div class="card auth-card">
-    <h1>Sign in</h1>
-    <p class="muted">Torrent download dashboard</p>
+    <div class="auth-brand"><span class="logo-mark logo-mark-lg" aria-hidden="true"></span></div>
+    <h1>Welcome back</h1>
+    <p class="muted">Sign in to your cloud torrent desk</p>
     {% if error %}
     <p class="error">{{ error }}</p>
     {% endif %}

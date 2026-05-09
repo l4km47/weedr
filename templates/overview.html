@@ -1,11 +1,10 @@
 {% extends "layout_app.html" %}
-{% block title %}Overview · Torrent{% endblock %}
+{% block title %}Overview · Vault{% endblock %}
 {% block page_heading %}Overview{% endblock %}
+{% block page_sub %}<p class="page-sub">Storage, magnets, and live HTTP traffic — add a torrent and you land on Transfers.</p>{% endblock %}
 {% block app_content %}
-<p class="intro-lead">Disk space, add magnets, and a quick view of who is pulling files over HTTP.</p>
-
 <div class="overview-grid">
-  <section class="card card-pro" id="disk-card">
+  <section class="card-pro" id="disk-card">
     <div class="card-head">
       <h2 class="card-title">Storage</h2>
     </div>
@@ -18,7 +17,7 @@
     </div>
   </section>
 
-  <section class="card card-pro">
+  <section class="card-pro">
     <div class="card-head">
       <h2 class="card-title">HTTP downloads</h2>
       <a href="{{ url_for('activity_page') }}" class="link-quiet small">Open activity →</a>
@@ -28,7 +27,7 @@
     </div>
   </section>
 
-  <section class="card card-pro span-full">
+  <section class="card-pro span-full">
     <div class="card-head">
       <h2 class="card-title">Add torrent</h2>
     </div>
@@ -135,6 +134,7 @@
     magnetForm.reset();
     pollDisk();
     pollActivity();
+    window.location.assign('{{ url_for("torrents_page") }}');
   });
 
   pollDisk();

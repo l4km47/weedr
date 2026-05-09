@@ -1,13 +1,13 @@
 {% extends "layout_app.html" %}
-{% block title %}Transfers · Torrent{% endblock %}
+{% block title %}Transfers · Vault{% endblock %}
 {% block page_heading %}Transfers{% endblock %}
+{% block page_sub %}<p class="page-sub">Live queue, bandwidth, and per-torrent charts — sampled every ~1.5s.</p>{% endblock %}
 {% block app_extra_head %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
 {% endblock %}
 {% block app_content %}
-<p class="intro-lead">BitTorrent transfers: queue, speeds, and per-torrent download/upload charts (last ~3 minutes at 1.5s samples).</p>
 <main class="stack-main">
-  <section class="card card-pro">
+  <section class="card-pro">
     <div class="card-head card-head-row">
       <h2 class="card-title">Transfers</h2>
       <div id="global-toolbar" class="stat-chips" aria-live="polite">
@@ -96,8 +96,8 @@
           {
             label: 'Download',
             data: downs,
-            borderColor: '#4a8cff',
-            backgroundColor: 'rgba(74, 140, 255, 0.08)',
+            borderColor: '#2dd4bf',
+            backgroundColor: 'rgba(45, 212, 191, 0.08)',
             fill: true,
             tension: 0.25,
             pointRadius: 0,
@@ -106,8 +106,8 @@
           {
             label: 'Upload',
             data: ups,
-            borderColor: '#7fd962',
-            backgroundColor: 'rgba(127, 217, 98, 0.06)',
+            borderColor: '#34d399',
+            backgroundColor: 'rgba(52, 211, 153, 0.06)',
             fill: true,
             tension: 0.25,
             pointRadius: 0,
@@ -120,7 +120,7 @@
         maintainAspectRatio: false,
         animation: false,
         plugins: {
-          legend: { display: true, labels: { color: '#8b9cb3', font: { size: 10 } } },
+          legend: { display: true, labels: { color: '#94a3b8', font: { size: 10 } } },
           tooltip: {
             callbacks: {
               label: function (ctx) {
@@ -134,7 +134,7 @@
           y: {
             beginAtZero: true,
             ticks: {
-              color: '#8b9cb3',
+              color: '#94a3b8',
               maxTicksLimit: 5,
               callback: function (v) { return fmtSpeed(v); },
             },

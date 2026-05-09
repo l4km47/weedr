@@ -1,10 +1,10 @@
 {% extends "layout_app.html" %}
-{% block title %}HTTP downloads · Torrent{% endblock %}
-{% block page_heading %}HTTP downloads{% endblock %}
+{% block title %}HTTP activity · Vault{% endblock %}
+{% block page_heading %}HTTP activity{% endblock %}
+{% block page_sub %}<p class="page-sub">Live pulls from <code>/files/…</code> — browsers and download managers; Range segments show as separate rows.</p>{% endblock %}
 {% block app_content %}
-<p class="intro-lead">Live connections to <code>/files/…</code> (browser or download managers). Each parallel Range request counts as one row; summary groups by IP + file.</p>
 <main class="stack-main">
-  <section class="card card-pro">
+  <section class="card-pro">
     <div class="card-head">
       <h2 class="card-title">Summary by file</h2>
       <span id="activity-count" class="badge-soft">0 connections</span>
@@ -12,7 +12,7 @@
     <div id="activity-summary" class="table-wrap"><p class="muted small">Loading…</p></div>
   </section>
 
-  <section class="card card-pro">
+  <section class="card-pro">
     <div class="card-head">
       <h2 class="card-title">Every HTTP connection</h2>
     </div>

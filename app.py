@@ -120,6 +120,23 @@ def _human_bytes(n: int) -> str:
     return f"{n} B"
 
 
+def _http_download_validators(full: Path) -> tuple[str, datetime]:
+    """
+    Validators for Range / resume on /files/… .
+
+    Werkzeug's default ETag embeds mtime and size. While a torrent is still
+    writing, those change between requests, so If-Range from an earlier chunk
+    no longer matches and the server falls back to a full 200 response (broken
+    resume in IDM/browsers). Use device + inode (stable for the same on-disk
+    file) and a fixed Last-Modified anchor so If-Range stays valid until the
+    path points at a different file (new inode).
+    """
+    st = full.stat()
+    etag = f"{st.st_dev:x}-{st.st_ino:x}"
+    lm = datetime(1994, 11, 6, tzinfo=timezone.utc)
+    return etag, lm
+
+
 def _disk_reserve(u: object) -> int:
     fixed = int(os.environ.get("DISK_RESERVE_BYTES", str(512 * 1024 * 1024)))
     pct = float(os.environ.get("DISK_RESERVE_PERCENT", "1.0"))
@@ -698,13 +715,16 @@ def create_app() -> Flask:
             _active_http_downloads[conn_id] = entry
 
         # conditional=True enables HTTP Range (206) + Accept-Ranges — required for IDM/FDM multi-connection segmented downloads
+        etag_val, lm_anchor = _http_download_validators(full)
         resp = send_file(
             full,
             as_attachment=True,
             download_name=full.name,
             conditional=True,
-            etag=True,
+            etag=etag_val,
+            last_modified=lm_anchor,
         )
+        resp.headers["Cache-Control"] = "private, no-store"
 
         def _release_http_download() -> None:
             with _file_download_lock:
