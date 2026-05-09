@@ -31,10 +31,6 @@
 
 <script>
 (function () {
-  const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
-  function headersJson() {
-    return { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken };
-  }
   const diskStats = document.getElementById('disk-stats');
   const diskBar = document.getElementById('disk-bar');
   const activityPreview = document.getElementById('activity-preview');
@@ -91,33 +87,6 @@
       renderActivityPreview(await res.json());
     } catch (_) {}
   }
-
-  magnetForm.addEventListener('submit', async function (e) {
-    e.preventDefault();
-    magnetMsg.classList.add('hidden');
-    const magnet = document.getElementById('magnet').value.trim();
-    const parent = document.getElementById('parent').value.trim();
-    const res = await fetch('{{ url_for("api_torrents_add") }}', {
-      method: 'POST',
-      headers: headersJson(),
-      body: JSON.stringify({ magnet, parent }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      magnetMsg.textContent = data.error || res.statusText;
-      magnetMsg.classList.remove('hidden');
-      magnetMsg.classList.add('error');
-      return;
-    }
-    var extra = data.save_folder ? (' Saved under: ' + data.save_folder + '.') : '';
-    magnetMsg.textContent = 'Added (gid ' + data.gid + ').' + extra;
-    magnetMsg.classList.remove('hidden', 'error');
-    magnetMsg.classList.add('ok');
-    magnetForm.reset();
-    pollDisk();
-    pollActivity();
-    window.location.assign('{{ url_for("torrents_page") }}');
-  });
 
   pollDisk();
   setInterval(pollDisk, 8000);

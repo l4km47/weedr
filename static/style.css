@@ -631,6 +631,26 @@ pre.log {
   color: var(--muted);
 }
 
+.header-add-magnet {
+  margin-top: 1rem;
+  padding: 1rem 1.15rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.18);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+}
+
+.header-add-magnet-desc {
+  margin: 0.35rem 0 0.85rem;
+  max-width: 48rem;
+  line-height: 1.45;
+}
+
+.stack-tight {
+  gap: 0.55rem;
+  margin-top: 0;
+}
+
 .inline-heading {
   margin: 0;
   font-size: 1.05rem;

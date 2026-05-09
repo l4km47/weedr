@@ -2,6 +2,20 @@
 {% block title %}Transfers · weedr{% endblock %}
 {% block page_heading %}Transfers{% endblock %}
 {% block page_sub %}<p class="page-sub">Live queue, bandwidth, and per-torrent charts — sampled every ~1.5s.</p>{% endblock %}
+{% block header_tools %}
+<section class="header-add-magnet" aria-labelledby="add-magnet-title">
+  <h2 id="add-magnet-title" class="inline-heading">Add torrent</h2>
+  <p class="muted small header-add-magnet-desc">One folder per torrent (from magnet <code>dn=</code> or hash). Optional parent groups torrents under your download dir. Space is checked before download starts.</p>
+  <form id="magnet-form" class="stack stack-tight">
+    <label for="magnet">Magnet</label>
+    <textarea id="magnet" name="magnet" rows="3" placeholder="magnet:?xt=urn:btih:..." required></textarea>
+    <label for="parent">Parent folder (optional)</label>
+    <input type="text" id="parent" name="parent" placeholder="e.g. linux/isos" autocomplete="off">
+    <button type="submit" class="btn primary">Add torrent</button>
+  </form>
+  <p id="magnet-msg" class="small hidden"></p>
+</section>
+{% endblock %}
 {% block app_extra_head %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
 {% endblock %}
@@ -30,6 +44,8 @@
 
   const torrentRoot = document.getElementById('torrent-sections');
   const globalToolbar = document.getElementById('global-toolbar');
+  const magnetForm = document.getElementById('magnet-form');
+  const magnetMsg = document.getElementById('magnet-msg');
   const chartMap = {};
   const speedHistory = {};
   const MAX_POINTS = 120;
@@ -356,6 +372,31 @@
       }
     } catch (_) {}
   }
+
+  magnetForm.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    magnetMsg.classList.add('hidden');
+    const magnet = document.getElementById('magnet').value.trim();
+    const parent = document.getElementById('parent').value.trim();
+    const res = await fetch('{{ url_for("api_torrents_add") }}', {
+      method: 'POST',
+      headers: headersJson(),
+      body: JSON.stringify({ magnet, parent }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      magnetMsg.textContent = data.error || res.statusText;
+      magnetMsg.classList.remove('hidden');
+      magnetMsg.classList.add('error');
+      return;
+    }
+    const extra = data.save_folder ? (' Saved under: ' + data.save_folder + '.') : '';
+    magnetMsg.textContent = 'Added (gid ' + data.gid + ').' + extra;
+    magnetMsg.classList.remove('hidden', 'error');
+    magnetMsg.classList.add('ok');
+    magnetForm.reset();
+    pollTorrents();
+  });
 
   pollTorrents();
   setInterval(pollTorrents, 1500);
