@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block body %}
+<div class="layout">
+  <header class="topbar">
+    <div class="brand">
+      <strong>Torrent dashboard</strong>
+      <span class="muted small">{{ download_dir }}</span>
+    </div>
+    <form method="post" action="{{ url_for('logout') }}" class="inline">
+      <button type="submit" class="btn ghost">Log out</button>
+    </form>
+  </header>
+
+  <main class="grid">
+    <section class="card">
+      <h2>Add magnet</h2>
+      <p class="muted small">Uses your <code>downloader.sh</code> (one job at a time; queue otherwise).</p>
+      <form id="magnet-form" class="stack">
+        <label for="magnet">Magnet link</label>
+        <textarea id="magnet" name="magnet" rows="3" placeholder="magnet:?xt=urn:btih:..." required></textarea>
+        <button type="submit" class="btn primary">Queue download</button>
+      </form>
+      <p id="magnet-msg" class="small hidden"></p>
+    </section>
+
+    <section class="card">
+      <h2>Jobs</h2>
+      <div id="jobs-root" class="jobs"></div>
+    </section>
+
+    <section class="card files-card">
+      <h2>Files</h2>
+      <nav class="breadcrumb">
+        {% if current_path %}
+        <a href="{{ url_for('dashboard') }}">torrents</a>
+        <span class="sep">/</span>
+        {% set parts = current_path.split('/') %}
+        {% for p in parts %}
+          {% set loop_path = '/'.join(parts[:loop.index0 + 1]) %}
+          {% if not loop.last %}
+          <a href="{{ url_for('dashboard', path=loop_path) }}">{{ p }}</a>
+          <span class="sep">/</span>
+          {% else %}
+          <span>{{ p }}</span>
+          {% endif %}
+        {% endfor %}
+        {% else %}
+        <span>torrents</span>
+        {% endif %}
+      </nav>
+      {% if parent_path or current_path %}
+      <p><a href="{{ url_for('dashboard', path=parent_path) if parent_path else url_for('dashboard') }}" class="small">&larr; Up</a></p>
+      {% endif %}
+      <table class="files">
+        <thead>
+          <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+        </thead>
+        <tbody>
+          {% for e in entries %}
+          <tr>
+            <td>
+              {% if e.is_dir %}
+              <a href="{{ url_for('dashboard', path=e.rel_path) }}">{{ e.name }}/</a>
+              {% else %}
+              <a href="{{ url_for('download_file', rel_path=e.rel_path) }}">{{ e.name }}</a>
+              {% endif %}
+            </td>
+            <td class="muted">{% if e.size is not none %}{{ e.size | filesizeformat }}{% else %}—{% endif %}</td>
+            <td class="muted small">{{ e.mtime }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="muted">Empty folder</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+</div>
+
+<script>
+(function () {
+  const form = document.getElementById('magnet-form');
+  const msg = document.getElementById('magnet-msg');
+  const jobsRoot = document.getElementById('jobs-root');
+
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    msg.classList.add('hidden');
+    const magnet = document.getElementById('magnet').value.trim();
+    const res = await fetch('{{ url_for("api_download") }}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ magnet }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      msg.textContent = data.error || res.statusText;
+      msg.classList.remove('hidden');
+      msg.classList.add('error');
+      return;
+    }
+    msg.textContent = 'Queued.';
+    msg.classList.remove('hidden', 'error');
+    msg.classList.add('ok');
+    form.reset();
+    pollJobs();
+  });
+
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function renderJobs(jobs) {
+    if (!jobs.length) {
+      jobsRoot.innerHTML = '<p class="muted">No jobs yet.</p>';
+      return;
+    }
+    jobsRoot.innerHTML = jobs.map(function (j) {
+      const statusClass = j.status === 'error' ? 'status error' : j.status === 'done' ? 'status ok' : 'status';
+      const logs = (j.log_lines || []).slice(-40).map(esc).join('\n');
+      return (
+        '<article class="job">' +
+        '<div class="job-head">' +
+        '<span class="' + statusClass + '">' + esc(j.status) + '</span>' +
+        '<span class="muted small">' + esc(j.created_at || '') + '</span>' +
+        '</div>' +
+        '<pre class="magnet">' + esc(j.magnet || '') + '</pre>' +
+        (logs ? '<pre class="log">' + logs + '</pre>' : '') +
+        '</article>'
+      );
+    }).join('');
+  }
+
+  async function pollJobs() {
+    try {
+      const res = await fetch('{{ url_for("api_jobs") }}');
+      if (!res.ok) return;
+      const data = await res.json();
+      renderJobs(data.jobs || []);
+    } catch (_) {}
+  }
+
+  pollJobs();
+  setInterval(pollJobs, 2000);
+})();
+</script>
+{% endblock %}

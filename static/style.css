@@ -1,0 +1,286 @@
+:root {
+  --bg: #0f1419;
+  --surface: #1a2332;
+  --border: #2d3a4d;
+  --text: #e7ecf3;
+  --muted: #8b9cb3;
+  --accent: #3d8bfd;
+  --danger: #f07178;
+  --ok: #7fd962;
+  --font: "Segoe UI", system-ui, sans-serif;
+  --radius: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--font);
+  background: radial-gradient(1200px 600px at 10% -10%, #1e2a3d 0%, var(--bg) 55%);
+  color: var(--text);
+}
+
+code {
+  font-size: 0.9em;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.85rem;
+}
+
+.error {
+  color: var(--danger);
+}
+
+.ok {
+  color: var(--ok);
+}
+
+.hidden {
+  display: none !important;
+}
+
+.auth-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.5rem 1.75rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.auth-card {
+  width: min(420px, 100%);
+}
+
+.auth-card h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.35rem;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+input[type="password"],
+textarea {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #121922;
+  color: var(--text);
+  font: inherit;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 72px;
+}
+
+.btn {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: #243044;
+  color: var(--text);
+  padding: 0.55rem 1rem;
+  border-radius: 8px;
+  font: inherit;
+}
+
+.btn.primary {
+  background: linear-gradient(180deg, #4a8cff, var(--accent));
+  border-color: #5a9cff;
+  font-weight: 600;
+}
+
+.btn.ghost {
+  background: transparent;
+}
+
+.btn:hover {
+  filter: brightness(1.06);
+}
+
+.layout {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.25rem 1rem 2rem;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.inline {
+  display: inline;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 380px) 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.files-card {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 820px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .files-card {
+    grid-column: span 1;
+  }
+}
+
+section.card h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.1rem;
+}
+
+.breadcrumb {
+  margin-bottom: 0.75rem;
+  font-size: 0.95rem;
+}
+
+.breadcrumb a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+.sep {
+  color: var(--muted);
+  margin: 0 0.15rem;
+}
+
+.files {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.files th,
+.files td {
+  text-align: left;
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.files th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.files a {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.files a:hover {
+  color: var(--accent);
+}
+
+.jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.job {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.job-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.status {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.error {
+  color: var(--danger);
+}
+
+pre.magnet {
+  margin: 0 0 0.35rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+pre.log {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--text);
+  background: #0c1016;
+  padding: 0.5rem;
+  border-radius: 6px;
+}
