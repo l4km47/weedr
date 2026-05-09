@@ -8,8 +8,10 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import tempfile
 import threading
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -684,6 +686,94 @@ def create_app() -> Flask:
         except OSError as e:
             return jsonify({"error": str(e)}), 400
         return jsonify({"ok": True})
+
+    @app.route("/files/<path:rel_path>/zip")
+    @limiter.limit("24 per minute")
+    def download_folder_zip(rel_path: str):
+        """
+        Zip a folder under DOWNLOAD_DIR and send as attachment.
+
+        Builds a temporary .zip on disk (needs free space ~ compressed size).
+        Uncompressed total size is capped by ZIP_FOLDER_MAX_BYTES (default 10 GiB).
+        """
+        if not require_auth():
+            abort(401)
+        rel_path = rel_path.strip().strip("/")
+        if not rel_path or ".." in rel_path.split("/"):
+            abort(400)
+        full = safe_under_root(DOWNLOAD_DIR, (DOWNLOAD_DIR / rel_path).resolve())
+        if full is None or not full.is_dir():
+            abort(404)
+
+        max_raw = int(os.environ.get("ZIP_FOLDER_MAX_BYTES", str(10 * 1024 * 1024 * 1024)))
+        total_raw = download_folder_usage_bytes(full)
+        if total_raw > max_raw:
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            f"Folder is too large to zip ({_human_bytes(total_raw)} uncompressed). "
+                            f"Limit is {_human_bytes(max_raw)} (ZIP_FOLDER_MAX_BYTES)."
+                        )
+                    }
+                ),
+                413,
+            )
+
+        fd, tmp_name = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            with zipfile.ZipFile(
+                tmp_path,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=6,
+            ) as zf:
+                wrote_any = False
+                for path in sorted(full.rglob("*"), key=lambda p: str(p).lower()):
+                    if path.is_symlink():
+                        continue
+                    if not path.is_file():
+                        continue
+                    try:
+                        arcname = path.relative_to(full).as_posix()
+                    except ValueError:
+                        continue
+                    try:
+                        zf.write(path, arcname=arcname)
+                        wrote_any = True
+                    except OSError:
+                        continue
+                if not wrote_any:
+                    dn = (full.name or "folder").strip("/") or "folder"
+                    zi = zipfile.ZipInfo(dn + "/")
+                    zi.external_attr = 0o40755 << 16
+                    zf.writestr(zi, b"")
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+        safe_base = (full.name or "folder").replace("/", "_").replace("\\", "_") or "folder"
+        download_name = safe_base + ".zip"
+
+        resp = send_file(
+            tmp_path,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype="application/zip",
+            max_age=0,
+        )
+        resp.headers["Cache-Control"] = "private, no-store"
+
+        def _unlink_zip() -> None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        resp.call_on_close(_unlink_zip)
+        return resp
 
     @app.route("/files/<path:rel_path>")
     def download_file(rel_path: str):

@@ -1,7 +1,7 @@
 {% extends "layout_app.html" %}
 {% block title %}Files · weedr{% endblock %}
 {% block page_heading %}Files{% endblock %}
-{% block page_sub %}<p class="page-sub">Everything on disk under your download folder — fetch via HTTP or delete to free space.</p>{% endblock %}
+{% block page_sub %}<p class="page-sub">Everything on disk under your download folder — open files over HTTP, download a whole folder as a <strong>.zip</strong>, or delete to free space.</p>{% endblock %}
 {% block app_content %}
 <main class="stack-main">
   <section class="card-pro files-browser">
@@ -31,7 +31,7 @@
       <div class="table-wrap">
         <table class="data-table files-grid">
           <thead>
-            <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
+            <tr><th>Name</th><th>Size</th><th>Modified</th><th>ZIP</th><th></th></tr>
           </thead>
           <tbody>
             {% for e in entries %}
@@ -47,10 +47,17 @@
               </td>
               <td class="muted tab-num">{% if e.size is not none %}{{ e.size | filesizeformat }}{% else %}—{% endif %}</td>
               <td class="muted small">{{ e.mtime }}</td>
+              <td class="actions nowrap">
+                {% if e.is_dir %}
+                <a href="{{ url_for('download_folder_zip', rel_path=e.rel_path) }}" class="btn btn-sm">ZIP</a>
+                {% else %}
+                <span class="muted">—</span>
+                {% endif %}
+              </td>
               <td class="actions"><button type="button" class="btn danger btn-sm fs-del">Delete</button></td>
             </tr>
             {% else %}
-            <tr><td colspan="4" class="muted empty-dir">This folder is empty.</td></tr>
+            <tr><td colspan="5" class="muted empty-dir">This folder is empty.</td></tr>
             {% endfor %}
           </tbody>
         </table>
