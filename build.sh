@@ -63,6 +63,7 @@ SESSION_COOKIE_SECURE=0
 SESSION_HOURS=10
 ARIA2_MAX_CONCURRENT=8
 ARIA2_SEED_TIME=0
+ARIA2_SEED_RATIO=0
 RATELIMIT_STORAGE_URI=memory://
 EOF
   chmod 600 "$ENV_FILE"
@@ -83,6 +84,10 @@ else
   fi
   if ! grep -q '^FLASK_DEBUG=' "$ENV_FILE"; then
     echo "FLASK_DEBUG=0" >> "$ENV_FILE"
+  fi
+  if ! grep -q '^ARIA2_SEED_RATIO=' "$ENV_FILE"; then
+    echo "ARIA2_SEED_RATIO=0" >> "$ENV_FILE"
+    info "appended ARIA2_SEED_RATIO=0"
   fi
 fi
 

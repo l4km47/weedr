@@ -255,6 +255,9 @@ def create_app() -> Flask:
             if safe_under_root(DOWNLOAD_DIR, target):
                 target.mkdir(parents=True, exist_ok=True)
                 options["dir"] = str(target)
+        # Do not seed after finished (global defaults; BitTorrent may still upload while downloading).
+        options["seed-time"] = os.environ.get("ARIA2_SEED_TIME", "0")
+        options["seed-ratio"] = os.environ.get("ARIA2_SEED_RATIO", "0")
         try:
             svc = ensure_aria2()
             gid = svc.call("aria2.addUri", [[magnet], options])

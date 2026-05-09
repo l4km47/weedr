@@ -32,6 +32,45 @@ DEFAULT_TRACKERS = (
 )
 
 
+def _parse_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        n = int(raw)
+        return n if n > 0 else default
+    except ValueError:
+        return default
+
+
+def _aria2_throughput_args() -> list[str]:
+    """
+    Defaults favor a fast VPS link; BitTorrent throughput still depends on swarm/peers.
+    Override via env — restart aria2 (and usually pm2) after changes.
+    """
+    max_conn = _parse_positive_int("ARIA2_MAX_CONNECTION_PER_SERVER", 64)
+    split = _parse_positive_int("ARIA2_SPLIT", 64)
+    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "1M").strip() or "1M"
+    bt_peers = _parse_positive_int("ARIA2_BT_MAX_PEERS", 300)
+    bt_open = _parse_positive_int("ARIA2_BT_MAX_OPEN_FILES", 1000)
+    disk_raw = (os.environ.get("ARIA2_DISK_CACHE") or "256M").strip()
+
+    out = [
+        f"--max-connection-per-server={max_conn}",
+        f"--split={split}",
+        f"--min-split-size={min_split}",
+        f"--bt-max-peers={bt_peers}",
+        f"--bt-max-open-files={bt_open}",
+        "--bt-request-peer-speed-limit=0",
+        "--max-overall-download-limit=0",
+        "--max-download-limit=0",
+        "--max-overall-upload-limit=0",
+    ]
+    if disk_raw.lower() not in ("", "0", "none", "off"):
+        out.append(f"--disk-cache={disk_raw}")
+    return out
+
+
 class Aria2RPCError(RuntimeError):
     pass
 
@@ -168,6 +207,8 @@ class Aria2Service:
             dht6 = self.state_dir / "dht6.dat"
             trackers = os.environ.get("ARIA2_BT_TRACKERS", DEFAULT_TRACKERS)
             seed_time = os.environ.get("ARIA2_SEED_TIME", "0")
+            # 0 disables ratio-based seed stop; use with seed-time=0 so nothing seeds after complete.
+            seed_ratio = os.environ.get("ARIA2_SEED_RATIO", "0")
 
             args = [
                 str(aria2),
@@ -183,6 +224,7 @@ class Aria2Service:
                 "--continue=true",
                 "--file-allocation=falloc",
                 f"--seed-time={seed_time}",
+                f"--seed-ratio={seed_ratio}",
                 "--bt-save-metadata=true",
                 f"--bt-tracker={trackers}",
                 "--enable-dht=true",
@@ -190,9 +232,7 @@ class Aria2Service:
                 f"--dht-file-path={dht}",
                 f"--dht-file-path6={dht6}",
                 "--follow-torrent=mem",
-                "--max-connection-per-server=16",
-                "--split=16",
-                "--min-split-size=1M",
+                *_aria2_throughput_args(),
                 f"--max-concurrent-downloads={self.max_concurrent_downloads}",
                 "--save-session-interval=30",
                 f"--save-session={session_file}",
