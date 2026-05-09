@@ -582,3 +582,261 @@ pre.log {
     margin: 0;
   }
 }
+
+/* ---------- Rework: typography, cards, tables ---------- */
+.intro-lead {
+  margin: 0 0 1.25rem;
+  max-width: 52rem;
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.link-quiet {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.link-quiet:hover {
+  text-decoration: underline;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.overview-grid .span-full {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 960px) {
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.card-pro {
+  overflow: hidden;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-bottom: 0.65rem;
+  margin-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.card-head-row {
+  flex-wrap: wrap;
+}
+
+.card-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.card-body {
+  padding-top: 0.35rem;
+}
+
+.card-desc {
+  margin: 0 0 1rem;
+  line-height: 1.45;
+}
+
+.stat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.chip-down {
+  border-color: rgba(74, 140, 255, 0.45);
+  color: #9ec5ff;
+}
+
+.chip-up {
+  border-color: rgba(127, 217, 98, 0.4);
+  color: #b8e6a8;
+}
+
+.chip-loading {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.badge-soft {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  background: rgba(61, 139, 253, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(61, 139, 253, 0.25);
+}
+
+.activity-preview {
+  min-height: 2.5rem;
+}
+
+.activity-mini {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  line-height: 1.5;
+}
+
+.activity-mini li {
+  margin: 0.2rem 0;
+}
+
+.preview-count {
+  margin-bottom: 0.35rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-top: 0.35rem;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.data-table tbody tr:hover {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.mono {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+.tag-range {
+  display: inline-block;
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  background: rgba(240, 113, 120, 0.15);
+  color: var(--danger);
+}
+
+.ua-cell {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.breadcrumb-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.pill {
+  display: inline-block;
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  text-decoration: none;
+  transition: background 0.15s ease;
+}
+
+.pill:hover {
+  background: rgba(61, 139, 253, 0.12);
+  border-color: rgba(61, 139, 253, 0.35);
+}
+
+.pill.is-current {
+  background: rgba(61, 139, 253, 0.15);
+  border-color: rgba(61, 139, 253, 0.4);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pill-sep {
+  color: var(--muted);
+  user-select: none;
+}
+
+.files-browser .file-name-cell {
+  font-weight: 500;
+}
+
+.files-browser .file-name-cell a {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.files-browser .file-name-cell a:hover {
+  color: var(--accent);
+}
+
+.file-glyph {
+  display: inline-block;
+  width: 1.25rem;
+  color: var(--accent);
+  opacity: 0.85;
+  font-size: 0.75rem;
+  vertical-align: middle;
+}
+
+.file-glyph-file {
+  color: var(--muted);
+}
+
+.tab-num {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.empty-dir {
+  padding: 1.25rem 0.5rem !important;
+  text-align: center;
+}

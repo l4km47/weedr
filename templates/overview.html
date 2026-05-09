@@ -2,29 +2,49 @@
 {% block title %}Overview · Torrent{% endblock %}
 {% block page_heading %}Overview{% endblock %}
 {% block app_content %}
-<main class="stack-main">
-  <section class="card" id="disk-card">
-    <h2>Disk</h2>
-    <p class="muted small">Volume = filesystem that holds your download folder. “Downloads folder” = space used by files under that path (scan; can be slow on huge trees).</p>
-    <div id="disk-stats" class="disk-stats muted small">Loading…</div>
-    <div class="disk-bar-wrap" title="Volume used / total">
-      <div id="disk-bar" class="disk-bar" style="width:0%"></div>
+<p class="intro-lead">Disk space, add magnets, and a quick view of who is pulling files over HTTP.</p>
+
+<div class="overview-grid">
+  <section class="card card-pro" id="disk-card">
+    <div class="card-head">
+      <h2 class="card-title">Storage</h2>
+    </div>
+    <div class="card-body">
+      <p class="muted small card-desc">Volume usage for the filesystem that contains your download folder; folder size sums files on disk (can take a moment on huge trees).</p>
+      <div id="disk-stats" class="disk-stats muted small">Loading…</div>
+      <div class="disk-bar-wrap" title="Volume used / total">
+        <div id="disk-bar" class="disk-bar" style="width:0%"></div>
+      </div>
     </div>
   </section>
 
-  <section class="card">
-    <h2>Add magnet</h2>
-    <p class="muted small">Each torrent is saved in its <strong>own subfolder</strong> (name from <code>dn=</code> in the magnet, or <code>torrent-&lt;hash&gt;</code>). Optional parent groups folders under a path you choose. Size is checked: magnets with <code>&amp;xl=</code> are verified immediately; others pause until metadata is known, then the download starts only if there is room (a reserve is kept for the OS).</p>
-    <form id="magnet-form" class="stack">
-      <label for="magnet">Magnet link</label>
-      <textarea id="magnet" name="magnet" rows="3" placeholder="magnet:?xt=urn:btih:..." required></textarea>
-      <label for="parent">Optional parent folder (under downloads)</label>
-      <input type="text" id="parent" name="parent" placeholder="e.g. linux/isos" autocomplete="off">
-      <button type="submit" class="btn primary">Add torrent</button>
-    </form>
-    <p id="magnet-msg" class="small hidden"></p>
+  <section class="card card-pro">
+    <div class="card-head">
+      <h2 class="card-title">HTTP downloads</h2>
+      <a href="{{ url_for('activity_page') }}" class="link-quiet small">Open activity →</a>
+    </div>
+    <div class="card-body">
+      <div id="activity-preview" class="activity-preview muted small">Loading…</div>
+    </div>
   </section>
-</main>
+
+  <section class="card card-pro span-full">
+    <div class="card-head">
+      <h2 class="card-title">Add torrent</h2>
+    </div>
+    <div class="card-body">
+      <p class="muted small card-desc">One folder per torrent (from magnet <code>dn=</code> or hash). Optional parent path groups torrents. Space is checked before download starts.</p>
+      <form id="magnet-form" class="stack">
+        <label for="magnet">Magnet</label>
+        <textarea id="magnet" name="magnet" rows="3" placeholder="magnet:?xt=urn:btih:..." required></textarea>
+        <label for="parent">Parent folder (optional)</label>
+        <input type="text" id="parent" name="parent" placeholder="e.g. linux/isos" autocomplete="off">
+        <button type="submit" class="btn primary">Add torrent</button>
+      </form>
+      <p id="magnet-msg" class="small hidden"></p>
+    </div>
+  </section>
+</div>
 
 <script>
 (function () {
@@ -36,6 +56,7 @@
   const diskBar = document.getElementById('disk-bar');
   const magnetForm = document.getElementById('magnet-form');
   const magnetMsg = document.getElementById('magnet-msg');
+  const activityPreview = document.getElementById('activity-preview');
 
   function esc(s) {
     const d = document.createElement('div');
@@ -53,9 +74,25 @@
     const pct = Math.min(100, Math.round((v.used_fraction || 0) * 1000) / 10);
     diskBar.style.width = pct + '%';
     diskStats.innerHTML =
-      '<div><strong>Volume</strong> — used ' + esc(v.used_human) + ' / ' + esc(v.total_human) +
-      ' · free ' + esc(v.free_human) + ' · effective free (after reserve) ' + esc(v.free_effective_human) + '</div>' +
-      '<div><strong>Downloads folder</strong> — ' + esc(f.used_human) + ' used under this tree</div>';
+      '<div><strong>Volume</strong> — ' + esc(v.used_human) + ' / ' + esc(v.total_human) +
+      ' · free ' + esc(v.free_human) + ' · usable ' + esc(v.free_effective_human) + '</div>' +
+      '<div><strong>Folder</strong> — ' + esc(f.used_human) + ' in download tree</div>';
+  }
+
+  function renderActivityPreview(data) {
+    const n = data.count || 0;
+    const rows = data.by_file || [];
+    if (!n) {
+      activityPreview.innerHTML = '<span class="muted">No active HTTP downloads.</span>';
+      return;
+    }
+    let h = '<div class="preview-count"><strong>' + n + '</strong> parallel HTTP connection' + (n === 1 ? '' : 's') + '</div><ul class="activity-mini">';
+    rows.slice(0, 6).forEach(function (r) {
+      h += '<li><span class="mono">' + esc(r.ip) + '</span> · ' + esc(r.filename || r.path) + ' · <span class="muted">' + esc(String(r.connections)) + ' conn</span></li>';
+    });
+    h += '</ul>';
+    if (rows.length > 6) h += '<p class="muted small">+' + (rows.length - 6) + ' more paths…</p>';
+    activityPreview.innerHTML = h;
   }
 
   async function pollDisk() {
@@ -63,6 +100,14 @@
       const res = await fetch('{{ url_for("api_fs_stats") }}');
       if (!res.ok) return;
       renderDisk(await res.json());
+    } catch (_) {}
+  }
+
+  async function pollActivity() {
+    try {
+      const res = await fetch('{{ url_for("api_activity_http_downloads") }}');
+      if (!res.ok) return;
+      renderActivityPreview(await res.json());
     } catch (_) {}
   }
 
@@ -89,10 +134,13 @@
     magnetMsg.classList.add('ok');
     magnetForm.reset();
     pollDisk();
+    pollActivity();
   });
 
   pollDisk();
   setInterval(pollDisk, 8000);
+  pollActivity();
+  setInterval(pollActivity, 3000);
 })();
 </script>
 {% endblock %}

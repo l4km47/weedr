@@ -5,14 +5,19 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
 {% endblock %}
 {% block app_content %}
+<p class="intro-lead">BitTorrent transfers: queue, speeds, and per-torrent download/upload charts (last ~3 minutes at 1.5s samples).</p>
 <main class="stack-main">
-  <section class="card">
-    <div class="section-head">
-      <h2 class="inline-heading">Active &amp; queue</h2>
-      <span id="global-stat" class="muted small"></span>
+  <section class="card card-pro">
+    <div class="card-head card-head-row">
+      <h2 class="card-title">Transfers</h2>
+      <div id="global-toolbar" class="stat-chips" aria-live="polite">
+        <span id="global-stat" class="chip chip-loading">…</span>
+      </div>
     </div>
-    <p class="muted small">Speed charts sample every poll (~1.5s), last ~3 minutes. Global speeds use human units (KiB / MiB / GiB per second).</p>
-    <div id="torrent-sections"></div>
+    <div class="card-body">
+      <p class="muted small card-desc">Charts appear only for <strong>active</strong> downloads. Stopped items stay listed for history until purged in aria2.</p>
+      <div id="torrent-sections"></div>
+    </div>
   </section>
 </main>
 
@@ -24,7 +29,7 @@
   }
 
   const torrentRoot = document.getElementById('torrent-sections');
-  const globalStat = document.getElementById('global-stat');
+  const globalToolbar = document.getElementById('global-toolbar');
   const chartMap = {};
   const speedHistory = {};
   const MAX_POINTS = 120;
@@ -320,8 +325,11 @@
       const g = meta.global || {};
       const dh = g.download_speed_human || fmtSpeed(g.downloadSpeed_bps != null ? g.downloadSpeed_bps : g.downloadSpeed);
       const uh = g.upload_speed_human || fmtSpeed(g.uploadSpeed_bps != null ? g.uploadSpeed_bps : g.uploadSpeed);
-      globalStat.textContent =
-        'Global · Down ' + dh + ' · Up ' + uh + ' · Active ' + (g.numActive != null ? g.numActive : '0');
+      const na = g.numActive != null ? g.numActive : '0';
+      globalToolbar.innerHTML =
+        '<span class="chip chip-down">↓ ' + esc(dh) + '</span>' +
+        '<span class="chip chip-up">↑ ' + esc(uh) + '</span>' +
+        '<span class="chip">Active ' + esc(String(na)) + '</span>';
 
       const active = d.active || [];
       appendHistory(active);

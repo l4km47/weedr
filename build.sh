@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Install Python deps, detect aria2, create .env with secrets if missing, start PM2 on port 8000.
 #
-# Web UI (after deploy): Overview / — add magnets & disk stats
-#                        /torrents — transfers + per-torrent speed charts (Chart.js CDN)
-#                        /files — browse & delete under DOWNLOAD_DIR
+# Web UI (after deploy): / — overview (disk, magnets, HTTP preview)
+#                        /torrents — BT transfers + charts (Chart.js CDN)
+#                        /files — browse & delete
+#                        /activity — live HTTP /files/… connections (IP, UA, Range)
 #
 set -euo pipefail
 

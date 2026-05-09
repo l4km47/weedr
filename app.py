@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,6 +59,31 @@ def _init_password_store() -> None:
 _init_password_store()
 
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", Path.home() / "torrents")).expanduser().resolve()
+
+_file_download_lock = threading.Lock()
+_active_http_downloads: dict[str, dict[str, Any]] = {}
+
+
+def summarize_http_downloads(flat: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group parallel Range connections (IDM/FDM) by IP + path."""
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for x in flat:
+        key = (str(x.get("ip") or ""), str(x.get("path") or ""))
+        if key not in groups:
+            groups[key] = {
+                "ip": x["ip"],
+                "path": x["path"],
+                "filename": x.get("filename") or "",
+                "connections": 0,
+                "range_connections": 0,
+                "since": x.get("since") or "",
+            }
+        g = groups[key]
+        g["connections"] += 1
+        if x.get("range_request"):
+            g["range_connections"] += 1
+    out = sorted(groups.values(), key=lambda z: z["connections"], reverse=True)
+    return out
 
 
 def _human_bytes(n: int) -> str:
@@ -284,6 +310,16 @@ def create_app() -> Flask:
             nav="files",
         )
 
+    @app.route("/activity")
+    def activity_page():
+        if not require_auth():
+            return redirect(url_for("login"))
+        return render_template(
+            "activity.html",
+            download_dir=str(DOWNLOAD_DIR),
+            nav="activity",
+        )
+
     def _list_files(root: Path, safe_fn, rel: str) -> list[dict]:
         base = root
         if rel:
@@ -363,6 +399,20 @@ def create_app() -> Flask:
                     "used_bytes": folder_used,
                     "used_human": _human_bytes(folder_used),
                 },
+            }
+        )
+
+    @app.route("/api/activity/http-downloads", methods=["GET"])
+    @limiter.limit("120 per minute")
+    def api_activity_http_downloads():
+        _auth_json()
+        with _file_download_lock:
+            conns = list(_active_http_downloads.values())
+        return jsonify(
+            {
+                "count": len(conns),
+                "connections": conns,
+                "by_file": summarize_http_downloads(conns),
             }
         )
 
@@ -601,14 +651,46 @@ def create_app() -> Flask:
         full = safe_under_root(DOWNLOAD_DIR, (DOWNLOAD_DIR / rel_path).resolve())
         if full is None or not full.is_file():
             abort(404)
+
+        trust_xff = os.environ.get("TRUST_X_FORWARDED_FOR", "").lower() in ("1", "true", "yes")
+        xff = request.headers.get("X-Forwarded-For")
+        if trust_xff and xff:
+            client_ip = xff.split(",")[0].strip()
+        else:
+            client_ip = (request.remote_addr or "").strip() or "unknown"
+
+        range_hdr = request.headers.get("Range") or ""
+        ua = (request.headers.get("User-Agent") or "")[:450]
+        conn_id = secrets.token_hex(10)
+        norm_path = rel_path.replace("\\", "/")
+        entry = {
+            "id": conn_id,
+            "path": norm_path,
+            "filename": full.name,
+            "ip": client_ip,
+            "user_agent": ua,
+            "range_request": bool(range_hdr),
+            "range_preview": range_hdr[:100],
+            "since": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        }
+        with _file_download_lock:
+            _active_http_downloads[conn_id] = entry
+
         # conditional=True enables HTTP Range (206) + Accept-Ranges — required for IDM/FDM multi-connection segmented downloads
-        return send_file(
+        resp = send_file(
             full,
             as_attachment=True,
             download_name=full.name,
             conditional=True,
             etag=True,
         )
+
+        def _release_http_download() -> None:
+            with _file_download_lock:
+                _active_http_downloads.pop(conn_id, None)
+
+        resp.call_on_close(_release_http_download)
+        return resp
 
     return app
 

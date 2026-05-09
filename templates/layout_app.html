@@ -7,13 +7,14 @@
 <div class="app-shell">
   <aside class="sidebar">
     <div class="sidebar-brand">
-      <strong>Torrent</strong>
+      <strong>weedr</strong>
       <span class="muted small sidebar-path">{{ download_dir }}</span>
     </div>
     <nav class="sidebar-nav">
       <a href="{{ url_for('overview') }}" class="nav-link {% if nav == 'overview' %}is-active{% endif %}">Overview</a>
       <a href="{{ url_for('torrents_page') }}" class="nav-link {% if nav == 'torrents' %}is-active{% endif %}">Transfers</a>
       <a href="{{ url_for('files_page') }}" class="nav-link {% if nav == 'files' %}is-active{% endif %}">Files</a>
+      <a href="{{ url_for('activity_page') }}" class="nav-link {% if nav == 'activity' %}is-active{% endif %}">HTTP activity</a>
     </nav>
     <div class="sidebar-footer">
       <form method="post" action="{{ url_for('logout') }}">

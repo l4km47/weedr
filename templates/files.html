@@ -2,55 +2,61 @@
 {% block title %}Files · Torrent{% endblock %}
 {% block page_heading %}Files{% endblock %}
 {% block app_content %}
+<p class="intro-lead">Browse and download what landed in your download folder. Delete frees space immediately.</p>
+
 <main class="stack-main">
-  <section class="card">
-    <h2>Files on disk</h2>
-    <nav class="breadcrumb">
-      {% if current_path %}
-      <a href="{{ url_for('files_page') }}">downloads</a>
-      <span class="sep">/</span>
-      {% set parts = current_path.split('/') %}
-      {% for p in parts %}
-        {% set loop_path = '/'.join(parts[:loop.index0 + 1]) %}
-        {% if not loop.last %}
-        <a href="{{ url_for('files_page', path=loop_path) }}">{{ p }}</a>
-        <span class="sep">/</span>
-        {% else %}
-        <span>{{ p }}</span>
-        {% endif %}
-      {% endfor %}
-      {% else %}
-      <span>downloads</span>
+  <section class="card card-pro files-browser">
+    <div class="card-head">
+      <h2 class="card-title">Browse</h2>
+      {% if parent_path or current_path %}
+      <a href="{{ url_for('files_page', path=parent_path) if parent_path else url_for('files_page') }}" class="link-quiet small">↑ Parent</a>
       {% endif %}
-    </nav>
-    {% if parent_path or current_path %}
-    <p><a href="{{ url_for('files_page', path=parent_path) if parent_path else url_for('files_page') }}" class="small">&larr; Up</a></p>
-    {% endif %}
-    <table class="files">
-      <thead>
-        <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
-      </thead>
-      <tbody>
-        {% for e in entries %}
-        <tr data-path="{{ e.rel_path }}" data-dir="{{ '1' if e.is_dir else '' }}">
-          <td>
-            {% if e.is_dir %}
-            <a href="{{ url_for('files_page', path=e.rel_path) }}">{{ e.name }}/</a>
-            {% else %}
-            <a href="{{ url_for('download_file', rel_path=e.rel_path) }}">{{ e.name }}</a>
-            {% endif %}
-          </td>
-          <td class="muted">{% if e.size is not none %}{{ e.size | filesizeformat }}{% else %}—{% endif %}</td>
-          <td class="muted small">{{ e.mtime }}</td>
-          <td class="actions">
-            <button type="button" class="btn danger btn-sm fs-del">Delete</button>
-          </td>
-        </tr>
-        {% else %}
-        <tr><td colspan="4" class="muted">Empty folder</td></tr>
+    </div>
+    <div class="card-body">
+      <nav class="breadcrumb-pills" aria-label="Path">
+        <a href="{{ url_for('files_page') }}" class="pill {% if not current_path %}is-current{% endif %}">downloads</a>
+        {% if current_path %}
+        {% set parts = current_path.split('/') %}
+        {% for p in parts %}
+          {% set loop_path = '/'.join(parts[:loop.index0 + 1]) %}
+          <span class="pill-sep">/</span>
+          {% if not loop.last %}
+          <a href="{{ url_for('files_page', path=loop_path) }}" class="pill">{{ p }}</a>
+          {% else %}
+          <span class="pill is-current">{{ p }}</span>
+          {% endif %}
         {% endfor %}
-      </tbody>
-    </table>
+        {% endif %}
+      </nav>
+
+      <div class="table-wrap">
+        <table class="data-table files-grid">
+          <thead>
+            <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
+          </thead>
+          <tbody>
+            {% for e in entries %}
+            <tr data-path="{{ e.rel_path }}" data-dir="{{ '1' if e.is_dir else '' }}">
+              <td class="file-name-cell">
+                {% if e.is_dir %}
+                <span class="file-glyph" aria-hidden="true">▸</span>
+                <a href="{{ url_for('files_page', path=e.rel_path) }}">{{ e.name }}/</a>
+                {% else %}
+                <span class="file-glyph file-glyph-file" aria-hidden="true">▬</span>
+                <a href="{{ url_for('download_file', rel_path=e.rel_path) }}">{{ e.name }}</a>
+                {% endif %}
+              </td>
+              <td class="muted tab-num">{% if e.size is not none %}{{ e.size | filesizeformat }}{% else %}—{% endif %}</td>
+              <td class="muted small">{{ e.mtime }}</td>
+              <td class="actions"><button type="button" class="btn danger btn-sm fs-del">Delete</button></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" class="muted empty-dir">This folder is empty.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
   </section>
 </main>
 
