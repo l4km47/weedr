@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
+import secrets
 import shutil
 import socket
 import subprocess
@@ -161,6 +161,8 @@ class Aria2Service:
 
             self.download_dir.mkdir(parents=True, exist_ok=True)
             self.state_dir.mkdir(parents=True, exist_ok=True)
+            session_file = self.state_dir / "aria2.session"
+            session_file.touch(exist_ok=True)
 
             dht = self.state_dir / "dht.dat"
             dht6 = self.state_dir / "dht6.dat"
@@ -193,13 +195,11 @@ class Aria2Service:
                 "--min-split-size=1M",
                 f"--max-concurrent-downloads={self.max_concurrent_downloads}",
                 "--save-session-interval=30",
-                f"--save-session={self.state_dir / 'aria2.session'}",
-                "--input-file=" + str(self.state_dir / "aria2.session"),
+                f"--save-session={session_file}",
+                f"--input-file={session_file}",
             ]
 
-            creationflags = 0
-            if os.name == "nt":
-                creationflags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
             subprocess.run(args, check=True, creationflags=creationflags)
 
@@ -226,7 +226,8 @@ def get_service(
         sd = Path(
             state_dir or os.environ.get("ARIA2_STATE_DIR", Path.home() / ".cache" / "torrent-server")
         ).expanduser()
-        port = int(os.environ["ARIA2_RPC_PORT"]) if os.environ.get("ARIA2_RPC_PORT") else 0
+        rp = os.environ.get("ARIA2_RPC_PORT", "").strip()
+        port = int(rp) if rp.isdigit() else 0
         secret = os.environ.get("ARIA2_RPC_SECRET")
         _service = Aria2Service(dd, sd, rpc_port=port or None, rpc_secret=secret or None)
     return _service
@@ -320,7 +321,6 @@ def normalize_download(raw: dict[str, Any]) -> dict[str, Any]:
         "followed_by": raw.get("followedBy"),
         "following": raw.get("following"),
         "belongs_to": raw.get("belongsTo"),
-        "raw": raw,
     }
 
 
@@ -347,31 +347,22 @@ def fetch_all_downloads(svc: Aria2Service) -> dict[str, list[dict[str, Any]]]:
         "numLeechers",
     ]
 
-    def fetch(method: str, *extra: Any) -> list[dict[str, Any]]:
+    def fetch_list(method: str, params: list[Any]) -> list[dict[str, Any]]:
         try:
-            result = svc.call(method, list(extra))
+            result = svc.call(method, params)
         except Aria2RPCError:
             return []
         out: list[dict[str, Any]] = []
         if not isinstance(result, list):
             return out
         for item in result:
-            if not isinstance(item, dict):
-                continue
-            gid = item.get("gid")
-            if not gid:
-                continue
-            try:
-                full = svc.call("aria2.tellStatus", [gid, keys])
-            except Aria2RPCError:
-                full = item
-            if isinstance(full, dict):
-                out.append(normalize_download(full))
+            if isinstance(item, dict) and item.get("gid"):
+                out.append(normalize_download(item))
         return out
 
-    active = fetch("aria2.tellActive", keys)
-    waiting = fetch("aria2.tellWaiting", 0, 1000, keys)
-    stopped = fetch("aria2.tellStopped", 0, 1000, keys)
+    active = fetch_list("aria2.tellActive", [keys])
+    waiting = fetch_list("aria2.tellWaiting", [0, 1000, keys])
+    stopped = fetch_list("aria2.tellStopped", [0, 1000, keys])
     return {"active": active, "waiting": waiting, "stopped": stopped}
 
 
