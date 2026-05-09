@@ -31,9 +31,11 @@
   </aside>
   <div class="app-main">
     <header class="main-header">
-      <h1 class="page-heading">{% block page_heading %}Dashboard{% endblock %}</h1>
+      <div class="main-header-row">
+        <h1 class="page-heading">{% block page_heading %}Dashboard{% endblock %}</h1>
+        {% block header_tools %}{% endblock %}
+      </div>
       {% block page_sub %}{% endblock %}
-      {% block header_tools %}{% endblock %}
     </header>
     {% block app_content %}{% endblock %}
     {% include 'partials/site_footer.html' %}
