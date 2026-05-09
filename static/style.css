@@ -704,12 +704,7 @@ pre.log {
 }
 
 .magnet-inline-magnet {
-  flex: 1 1 140px;
-}
-
-.magnet-inline-parent {
-  flex: 0 1 9.5rem;
-  min-width: 6.5rem;
+  flex: 1 1 180px;
 }
 
 .magnet-inline-submit {

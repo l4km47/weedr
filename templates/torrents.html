@@ -6,9 +6,7 @@
 <div class="header-add-toolbar">
   <form id="magnet-form" class="magnet-inline-form">
     <label class="sr-only" for="magnet">Magnet link</label>
-    <input type="text" id="magnet" name="magnet" class="magnet-inline-field magnet-inline-magnet" placeholder="Paste magnet link…" autocomplete="off" spellcheck="false" required>
-    <label class="sr-only" for="parent">Subfolder under downloads (optional)</label>
-    <input type="text" id="parent" name="parent" class="magnet-inline-field magnet-inline-parent" placeholder="Subfolder (optional)" autocomplete="off">
+    <input type="text" id="magnet" name="magnet" class="magnet-inline-field magnet-inline-magnet" placeholder="Tap — paste from clipboard &amp; add" autocomplete="off" spellcheck="false" required inputmode="url">
     <button type="submit" class="btn primary btn-sm magnet-inline-submit">Add</button>
   </form>
   <p id="magnet-msg" class="magnet-inline-msg small hidden"></p>
@@ -375,23 +373,38 @@
     if (!form) return;
     form.reset();
     var m = form.elements.namedItem('magnet');
-    var p = form.elements.namedItem('parent');
     if (m && 'value' in m) m.value = '';
-    if (p && 'value' in p) p.value = '';
   }
 
   if (magnetForm) {
+    var magnetInput = magnetForm.elements.namedItem('magnet');
+    var clipboardTapLock = false;
+    if (magnetInput && magnetInput instanceof HTMLInputElement) {
+      magnetInput.addEventListener('click', async function () {
+        if (clipboardTapLock) return;
+        clipboardTapLock = true;
+        setTimeout(function () { clipboardTapLock = false; }, 500);
+        try {
+          var text = await navigator.clipboard.readText();
+          text = (text || '').trim();
+          if (!text) return;
+          magnetInput.value = text;
+          if (text.toLowerCase().startsWith('magnet:')) {
+            magnetForm.requestSubmit();
+          }
+        } catch (_) {}
+      });
+    }
+
     magnetForm.addEventListener('submit', async function (e) {
       e.preventDefault();
       magnetMsg.classList.add('hidden');
       var magnetEl = magnetForm.elements.namedItem('magnet');
-      var parentEl = magnetForm.elements.namedItem('parent');
       var magnet = magnetEl && magnetEl.value ? magnetEl.value.trim() : '';
-      var parent = parentEl && parentEl.value ? parentEl.value.trim() : '';
       const res = await fetch('{{ url_for("api_torrents_add") }}', {
         method: 'POST',
         headers: headersJson(),
-        body: JSON.stringify({ magnet, parent }),
+        body: JSON.stringify({ magnet, parent: '' }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
