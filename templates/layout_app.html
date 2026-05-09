@@ -8,16 +8,16 @@
   <aside class="sidebar">
     <div class="sidebar-brand">
       <div class="brand-lockup">
-        <span class="logo-mark" aria-hidden="true"></span>
+        {% include 'partials/logo_mark.html' %}
         <div class="brand-text">
-          <strong class="brand-name">Vault</strong>
+          <strong class="brand-name">weedr</strong>
           <span class="brand-tagline">cloud torrent</span>
         </div>
       </div>
       <span class="muted small sidebar-path" title="Download directory">{{ download_dir }}</span>
     </div>
     <nav class="sidebar-nav" aria-label="Main">
-      <a href="{{ url_for('overview') }}" class="nav-link {% if nav == 'overview' %}is-active{% endif %}"><span class="nav-label">Overview</span><span class="nav-hint">Disk &amp; add</span></a>
+      <a href="{{ url_for('overview') }}" class="nav-link {% if nav == 'overview' %}is-active{% endif %}"><span class="nav-label">Overview</span><span class="nav-hint">Storage &amp; HTTP</span></a>
       <a href="{{ url_for('torrents_page') }}" class="nav-link {% if nav == 'torrents' %}is-active{% endif %}"><span class="nav-label">Transfers</span><span class="nav-hint">Queue &amp; speeds</span></a>
       <a href="{{ url_for('files_page') }}" class="nav-link {% if nav == 'files' %}is-active{% endif %}"><span class="nav-label">Files</span><span class="nav-hint">Browse &amp; grab</span></a>
       <a href="{{ url_for('activity_page') }}" class="nav-link {% if nav == 'activity' %}is-active{% endif %}"><span class="nav-label">HTTP activity</span><span class="nav-hint">Who’s downloading</span></a>
@@ -33,6 +33,7 @@
     <header class="main-header">
       <h1 class="page-heading">{% block page_heading %}Dashboard{% endblock %}</h1>
       {% block page_sub %}{% endblock %}
+      {% block header_tools %}{% endblock %}
     </header>
     {% block app_content %}{% endblock %}
   </div>

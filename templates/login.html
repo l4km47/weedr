@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Sign in · Vault{% endblock %}
+{% block title %}Sign in · weedr{% endblock %}
 {% block body %}
 <div class="auth-wrap">
   <div class="auth-backdrop" aria-hidden="true"></div>
   <div class="card auth-card">
-    <div class="auth-brand"><span class="logo-mark logo-mark-lg" aria-hidden="true"></span></div>
+    <div class="auth-brand">{% set logo_extra_class = 'logo-mark-lg' %}{% include 'partials/logo_mark.html' %}</div>
     <h1>Welcome back</h1>
     <p class="muted">Sign in to your cloud torrent desk</p>
     {% if error %}

@@ -495,11 +495,25 @@ pre.log {
 
 .logo-mark {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 36px;
   height: 36px;
   border-radius: 10px;
   background: linear-gradient(145deg, #5eead4, var(--accent-dim), #0d9488);
   box-shadow: 0 4px 14px rgba(45, 212, 191, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.logo-mark-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.logo-mark-lg .logo-mark-icon {
+  width: 26px;
+  height: 26px;
 }
 
 .brand-text {
