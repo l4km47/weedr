@@ -28,7 +28,6 @@ from flask import (
     url_for,
 )
 from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from werkzeug.security import check_password_hash
 
 from aria2_service import Aria2RPCError, fetch_all_downloads, get_service, global_stat
@@ -84,6 +83,33 @@ def summarize_http_downloads(flat: list[dict[str, Any]]) -> list[dict[str, Any]]
             g["range_connections"] += 1
     out = sorted(groups.values(), key=lambda z: z["connections"], reverse=True)
     return out
+
+
+def get_client_ip() -> str:
+    """
+    Best-effort real client IP behind Cloudflare or reverse proxies.
+
+    Cloudflare sets CF-Connecting-IP to the visitor address. Without reading it,
+    request.remote_addr is often 127.0.0.1 (tunnel to nginx/gunicorn).
+
+    Order: CF-Connecting-IP → True-Client-IP → X-Forwarded-For (if trusted) → remote_addr.
+
+    Restrict origin access to Cloudflare (or your proxy) only; otherwise CF-* headers can be spoofed.
+    """
+    h = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if h:
+        return h.split(",")[0].strip()
+
+    h = (request.headers.get("True-Client-IP") or "").strip()
+    if h:
+        return h.split(",")[0].strip()
+
+    if os.environ.get("TRUST_X_FORWARDED_FOR", "").lower() in ("1", "true", "yes"):
+        xff = (request.headers.get("X-Forwarded-For") or "").strip()
+        if xff:
+            return xff.split(",")[0].strip()
+
+    return (request.remote_addr or "").strip() or "unknown"
 
 
 def _human_bytes(n: int) -> str:
@@ -185,7 +211,7 @@ def create_app() -> Flask:
     CSRFProtect(app)
 
     limiter = Limiter(
-        key_func=get_remote_address,
+        key_func=get_client_ip,
         app=app,
         default_limits=[],
         storage_uri=os.environ.get("RATELIMIT_STORAGE_URI", "memory://"),
@@ -652,12 +678,7 @@ def create_app() -> Flask:
         if full is None or not full.is_file():
             abort(404)
 
-        trust_xff = os.environ.get("TRUST_X_FORWARDED_FOR", "").lower() in ("1", "true", "yes")
-        xff = request.headers.get("X-Forwarded-For")
-        if trust_xff and xff:
-            client_ip = xff.split(",")[0].strip()
-        else:
-            client_ip = (request.remote_addr or "").strip() or "unknown"
+        client_ip = get_client_ip()
 
         range_hdr = request.headers.get("Range") or ""
         ua = (request.headers.get("User-Agent") or "")[:450]
