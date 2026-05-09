@@ -1,0 +1,356 @@
+{% extends "layout_app.html" %}
+{% block title %}Transfers · Torrent{% endblock %}
+{% block page_heading %}Transfers{% endblock %}
+{% block app_extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
+{% endblock %}
+{% block app_content %}
+<main class="stack-main">
+  <section class="card">
+    <div class="section-head">
+      <h2 class="inline-heading">Active &amp; queue</h2>
+      <span id="global-stat" class="muted small"></span>
+    </div>
+    <p class="muted small">Speed charts sample every poll (~1.5s), last ~3 minutes. Global speeds use human units (KiB / MiB / GiB per second).</p>
+    <div id="torrent-sections"></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+  function headersJson() {
+    return { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken };
+  }
+
+  const torrentRoot = document.getElementById('torrent-sections');
+  const globalStat = document.getElementById('global-stat');
+  const chartMap = {};
+  const speedHistory = {};
+  const MAX_POINTS = 120;
+
+  function fmtSpeed(bps) {
+    bps = Number(bps) || 0;
+    if (bps >= 1073741824) return (bps / 1073741824).toFixed(2) + ' GiB/s';
+    if (bps >= 1048576) return (bps / 1048576).toFixed(2) + ' MiB/s';
+    if (bps >= 1024) return (bps / 1024).toFixed(1) + ' KiB/s';
+    return bps + ' B/s';
+  }
+
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  function appendHistory(active) {
+    const seen = new Set();
+    const now = Date.now();
+    (active || []).forEach(function (t) {
+      const gid = t.gid;
+      if (!gid) return;
+      seen.add(gid);
+      if (!speedHistory[gid]) speedHistory[gid] = [];
+      speedHistory[gid].push({
+        t: now,
+        down: Number(t.download_speed) || 0,
+        up: Number(t.upload_speed) || 0,
+      });
+      while (speedHistory[gid].length > MAX_POINTS) speedHistory[gid].shift();
+    });
+    Object.keys(speedHistory).forEach(function (gid) {
+      if (!seen.has(gid)) {
+        delete speedHistory[gid];
+        if (chartMap[gid]) {
+          try { chartMap[gid].destroy(); } catch (_) {}
+          delete chartMap[gid];
+        }
+      }
+    });
+  }
+
+  function destroyAllCharts() {
+    Object.keys(chartMap).forEach(function (gid) {
+      try { chartMap[gid].destroy(); } catch (_) {}
+      delete chartMap[gid];
+    });
+  }
+
+  function buildChart(canvas, gid) {
+    const hist = speedHistory[gid] || [];
+    const labels = hist.map(function (_, i) { return ''; });
+    const downs = hist.map(function (h) { return h.down; });
+    const ups = hist.map(function (h) { return h.up; });
+
+    const ctx = canvas.getContext('2d');
+    const cfg = {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            label: 'Download',
+            data: downs,
+            borderColor: '#4a8cff',
+            backgroundColor: 'rgba(74, 140, 255, 0.08)',
+            fill: true,
+            tension: 0.25,
+            pointRadius: 0,
+            borderWidth: 1.5,
+          },
+          {
+            label: 'Upload',
+            data: ups,
+            borderColor: '#7fd962',
+            backgroundColor: 'rgba(127, 217, 98, 0.06)',
+            fill: true,
+            tension: 0.25,
+            pointRadius: 0,
+            borderWidth: 1.5,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: true, labels: { color: '#8b9cb3', font: { size: 10 } } },
+          tooltip: {
+            callbacks: {
+              label: function (ctx) {
+                return ctx.dataset.label + ': ' + fmtSpeed(ctx.parsed.y);
+              },
+            },
+          },
+        },
+        scales: {
+          x: { display: false },
+          y: {
+            beginAtZero: true,
+            ticks: {
+              color: '#8b9cb3',
+              maxTicksLimit: 5,
+              callback: function (v) { return fmtSpeed(v); },
+            },
+            grid: { color: 'rgba(45, 58, 77, 0.5)' },
+          },
+        },
+      },
+    };
+
+    if (chartMap[gid]) {
+      try { chartMap[gid].destroy(); } catch (_) {}
+      delete chartMap[gid];
+    }
+    chartMap[gid] = new Chart(ctx, cfg);
+  }
+
+  function rowActions(t) {
+    const gidRaw = String(t.gid || '');
+    const gidEsc = esc(gidRaw);
+    const status = t.status || '';
+    let btns = '';
+    if (status === 'active' || status === 'paused') {
+      btns += '<button type="button" class="btn btn-sm" data-act="pause" data-gid="' + gidEsc + '">Pause</button>';
+      btns += '<button type="button" class="btn btn-sm" data-act="resume" data-gid="' + gidEsc + '">Resume</button>';
+    }
+    if (status === 'waiting') {
+      btns += '<button type="button" class="btn btn-sm" data-act="prioritize" data-gid="' + gidEsc + '">Move to top</button>';
+    }
+    btns += '<button type="button" class="btn btn-sm danger" data-act="remove" data-gid="' + gidEsc + '">Remove</button>';
+    btns += '<label class="inline-check"><input type="checkbox" data-del-files="' + gidEsc + '"> delete files</label>';
+    return '<td class="nowrap">' + btns + '</td>';
+  }
+
+  function renderActiveTable(rows) {
+    if (!rows.length) {
+      return '<h3 class="sub">Active</h3><p class="muted">No active downloads.</p>';
+    }
+    let h = '<h3 class="sub">Active</h3>';
+    h += '<div class="table-scroll"><table class="torrents"><thead><tr>';
+    h += '<th>Name</th><th>Progress</th><th>Speed chart</th><th>Down</th><th>Up</th><th>ETA</th><th>Pairs</th><th>Seed/Leech</th><th>Status</th><th></th>';
+    h += '</tr></thead><tbody>';
+    rows.forEach(function (t) {
+      const prog = (t.progress_percent != null ? t.progress_percent : 0);
+      const seed = (t.num_seeders != null ? t.num_seeders : '—');
+      const leech = (t.num_leechers != null ? t.num_leechers : '—');
+      const gidRaw = String(t.gid || '');
+      const gidEsc = esc(gidRaw);
+      h += '<tr>';
+      h += '<td class="name" title="' + esc(t.name || '') + '">' + esc((t.name || t.gid).slice(0, 40)) + '</td>';
+      h += '<td>' + esc(String(prog)) + '%</td>';
+      h += '<td class="chart-cell"><div class="chart-wrap"><canvas data-chart-gid="' + gidRaw + '"></canvas></div></td>';
+      h += '<td>' + esc(t.download_speed_human || fmtSpeed(t.download_speed)) + '</td>';
+      h += '<td>' + esc(t.upload_speed_human || fmtSpeed(t.upload_speed)) + '</td>';
+      h += '<td>' + esc(t.eta_human || '—') + '</td>';
+      h += '<td>' + esc(String(t.connections != null ? t.connections : '—')) + '</td>';
+      h += '<td>' + esc(String(seed)) + ' / ' + esc(String(leech)) + '</td>';
+      h += '<td><span class="pill">' + esc(t.status || '') + '</span></td>';
+      h += rowActions(t);
+      h += '</tr>';
+      h += '<tr class="opts-row"><td colspan="10">';
+      h += '<details><summary>Limits / seeding</summary>';
+      h += '<div class="opts-grid">';
+      h += '<label>Max down <input type="text" data-opt="max-download-limit" placeholder="e.g. 4M or 0"></label>';
+      h += '<label>Max up <input type="text" data-opt="max-upload-limit" placeholder="e.g. 1M or 0"></label>';
+      h += '<label>Seed ratio <input type="text" data-opt="seed-ratio" placeholder="default"></label>';
+      h += '<button type="button" class="btn btn-sm primary" data-act="save-opts" data-gid="' + gidEsc + '">Apply options</button>';
+      h += '</div></details>';
+      h += '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+    return h;
+  }
+
+  function renderPlainTable(title, rows, emptyMsg, cols) {
+    cols = cols || 9;
+    if (!rows.length) {
+      return '<h3 class="sub">' + esc(title) + '</h3><p class="muted">' + esc(emptyMsg) + '</p>';
+    }
+    let h = '<h3 class="sub">' + esc(title) + '</h3>';
+    h += '<div class="table-scroll"><table class="torrents"><thead><tr>';
+    h += '<th>Name</th><th>Progress</th><th>Down</th><th>Up</th><th>ETA</th><th>Pairs</th><th>Seed/Leech</th><th>Status</th><th></th>';
+    h += '</tr></thead><tbody>';
+    rows.forEach(function (t) {
+      const prog = (t.progress_percent != null ? t.progress_percent : 0);
+      const seed = (t.num_seeders != null ? t.num_seeders : '—');
+      const leech = (t.num_leechers != null ? t.num_leechers : '—');
+      h += '<tr>';
+      h += '<td class="name" title="' + esc(t.name || '') + '">' + esc((t.name || t.gid).slice(0, 48)) + '</td>';
+      h += '<td>' + esc(String(prog)) + '%</td>';
+      h += '<td>' + esc(t.download_speed_human || fmtSpeed(t.download_speed)) + '</td>';
+      h += '<td>' + esc(t.upload_speed_human || fmtSpeed(t.upload_speed)) + '</td>';
+      h += '<td>' + esc(t.eta_human || '—') + '</td>';
+      h += '<td>' + esc(String(t.connections != null ? t.connections : '—')) + '</td>';
+      h += '<td>' + esc(String(seed)) + ' / ' + esc(String(leech)) + '</td>';
+      h += '<td><span class="pill">' + esc(t.status || '') + '</span></td>';
+      h += rowActions(t);
+      h += '</tr>';
+      h += '<tr class="opts-row"><td colspan="' + cols + '">';
+      h += '<details><summary>Limits / seeding</summary>';
+      h += '<div class="opts-grid">';
+      h += '<label>Max down <input type="text" data-opt="max-download-limit" placeholder="e.g. 4M or 0"></label>';
+      h += '<label>Max up <input type="text" data-opt="max-upload-limit" placeholder="e.g. 1M or 0"></label>';
+      h += '<label>Seed ratio <input type="text" data-opt="seed-ratio" placeholder="default"></label>';
+      h += '<button type="button" class="btn btn-sm primary" data-act="save-opts" data-gid="' + esc(t.gid) + '">Apply options</button>';
+      h += '</div></details>';
+      h += '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+    return h;
+  }
+
+  torrentRoot.addEventListener('click', async function (e) {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const act = btn.getAttribute('data-act');
+    const gid = btn.getAttribute('data-gid');
+    if (!gid) return;
+    if (act === 'save-opts') {
+      const trOpts = btn.closest('tr');
+      const opts = {};
+      if (!trOpts) return;
+      trOpts.querySelectorAll('input[data-opt]').forEach(function (inp) {
+        const k = inp.getAttribute('data-opt');
+        const v = inp.value.trim();
+        if (v) opts[k] = v;
+      });
+      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + '/options', {
+        method: 'POST',
+        headers: headersJson(),
+        body: JSON.stringify({ options: opts }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || res.statusText);
+      }
+      return;
+    }
+    if (act === 'remove') {
+      const box = torrentRoot.querySelector('input[data-del-files="' + gid + '"]');
+      const delFiles = box && box.checked;
+      const q = delFiles ? '?delete_files=1' : '';
+      if (!confirm('Remove this torrent from aria2?' + (delFiles ? ' Files on disk will be deleted.' : ''))) return;
+      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + q, {
+        method: 'DELETE',
+        headers: headersJson(),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || res.statusText);
+      }
+      pollTorrents();
+      return;
+    }
+    if (act === 'prioritize') {
+      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + '/prioritize', {
+        method: 'POST',
+        headers: headersJson(),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || res.statusText);
+      }
+      pollTorrents();
+      return;
+    }
+    const path = act === 'pause'
+      ? '/api/torrents/' + encodeURIComponent(gid) + '/pause'
+      : '/api/torrents/' + encodeURIComponent(gid) + '/resume';
+    const res = await fetch(path, { method: 'POST', headers: headersJson() });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || res.statusText);
+    }
+    pollTorrents();
+  });
+
+  async function pollTorrents() {
+    try {
+      const res = await fetch('{{ url_for("api_torrents_list") }}');
+      if (res.status === 401) return;
+      const data = await res.json();
+      if (!res.ok) {
+        torrentRoot.innerHTML = '<p class="error">' + esc(data.error || res.statusText) + '</p>';
+        return;
+      }
+      const d = data.downloads || {};
+      const meta = data.meta || {};
+      const g = meta.global || {};
+      const dh = g.download_speed_human || fmtSpeed(g.downloadSpeed_bps != null ? g.downloadSpeed_bps : g.downloadSpeed);
+      const uh = g.upload_speed_human || fmtSpeed(g.uploadSpeed_bps != null ? g.uploadSpeed_bps : g.uploadSpeed);
+      globalStat.textContent =
+        'Global · Down ' + dh + ' · Up ' + uh + ' · Active ' + (g.numActive != null ? g.numActive : '0');
+
+      const active = d.active || [];
+      appendHistory(active);
+      destroyAllCharts();
+
+      torrentRoot.innerHTML =
+        renderActiveTable(active) +
+        renderPlainTable('Waiting', d.waiting || [], 'Queue empty.', 9) +
+        renderPlainTable('Stopped / completed', (d.stopped || []).slice(0, 80), 'No history.', 9) +
+        '<p class="small muted"><button type="button" class="btn btn-sm" id="purge-stopped">Clear stopped history</button></p>';
+
+      torrentRoot.querySelectorAll('canvas[data-chart-gid]').forEach(function (canvas) {
+        const gid = canvas.getAttribute('data-chart-gid');
+        if (gid) buildChart(canvas, gid);
+      });
+
+      const purgeBtn = document.getElementById('purge-stopped');
+      if (purgeBtn) {
+        purgeBtn.addEventListener('click', async function () {
+          if (!confirm('Purge stopped download results from aria2?')) return;
+          await fetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
+          pollTorrents();
+        });
+      }
+    } catch (_) {}
+  }
+
+  pollTorrents();
+  setInterval(pollTorrents, 1500);
+})();
+</script>
+{% endblock %}

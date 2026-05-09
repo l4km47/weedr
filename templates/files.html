@@ -1,0 +1,85 @@
+{% extends "layout_app.html" %}
+{% block title %}Files · Torrent{% endblock %}
+{% block page_heading %}Files{% endblock %}
+{% block app_content %}
+<main class="stack-main">
+  <section class="card">
+    <h2>Files on disk</h2>
+    <nav class="breadcrumb">
+      {% if current_path %}
+      <a href="{{ url_for('files_page') }}">downloads</a>
+      <span class="sep">/</span>
+      {% set parts = current_path.split('/') %}
+      {% for p in parts %}
+        {% set loop_path = '/'.join(parts[:loop.index0 + 1]) %}
+        {% if not loop.last %}
+        <a href="{{ url_for('files_page', path=loop_path) }}">{{ p }}</a>
+        <span class="sep">/</span>
+        {% else %}
+        <span>{{ p }}</span>
+        {% endif %}
+      {% endfor %}
+      {% else %}
+      <span>downloads</span>
+      {% endif %}
+    </nav>
+    {% if parent_path or current_path %}
+    <p><a href="{{ url_for('files_page', path=parent_path) if parent_path else url_for('files_page') }}" class="small">&larr; Up</a></p>
+    {% endif %}
+    <table class="files">
+      <thead>
+        <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for e in entries %}
+        <tr data-path="{{ e.rel_path }}" data-dir="{{ '1' if e.is_dir else '' }}">
+          <td>
+            {% if e.is_dir %}
+            <a href="{{ url_for('files_page', path=e.rel_path) }}">{{ e.name }}/</a>
+            {% else %}
+            <a href="{{ url_for('download_file', rel_path=e.rel_path) }}">{{ e.name }}</a>
+            {% endif %}
+          </td>
+          <td class="muted">{% if e.size is not none %}{{ e.size | filesizeformat }}{% else %}—{% endif %}</td>
+          <td class="muted small">{{ e.mtime }}</td>
+          <td class="actions">
+            <button type="button" class="btn danger btn-sm fs-del">Delete</button>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="muted">Empty folder</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+(function () {
+  const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+  function headersJson() {
+    return { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken };
+  }
+  document.querySelectorAll('button.fs-del').forEach(function (btn) {
+    btn.addEventListener('click', async function () {
+      const tr = btn.closest('tr');
+      const rel = tr.getAttribute('data-path');
+      const isDir = tr.getAttribute('data-dir') === '1';
+      if (!rel) return;
+      if (!confirm('Delete ' + (isDir ? 'folder' : 'file') + ' "' + rel + '" ?')) return;
+      const res = await fetch('{{ url_for("api_fs_delete") }}', {
+        method: 'POST',
+        headers: headersJson(),
+        body: JSON.stringify({ path: rel }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || res.statusText);
+        return;
+      }
+      tr.remove();
+    });
+  });
+})();
+</script>
+{% endblock %}

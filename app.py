@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from flask import (
     redirect,
     render_template,
     request,
-    send_from_directory,
+    send_file,
     session,
     url_for,
 )
@@ -30,6 +31,7 @@ from flask_limiter.util import get_remote_address
 from werkzeug.security import check_password_hash
 
 from aria2_service import Aria2RPCError, fetch_all_downloads, get_service, global_stat
+from magnet_util import auto_subfolder_name, parse_magnet, pick_unique_dir
 
 try:
     from flask_wtf.csrf import CSRFProtect
@@ -56,6 +58,75 @@ def _init_password_store() -> None:
 _init_password_store()
 
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", Path.home() / "torrents")).expanduser().resolve()
+
+
+def _human_bytes(n: int) -> str:
+    n = max(0, int(n))
+    for suf, div in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if n >= div:
+            return f"{n / div:.2f} {suf}"
+    return f"{n} B"
+
+
+def _disk_reserve(u: object) -> int:
+    fixed = int(os.environ.get("DISK_RESERVE_BYTES", str(512 * 1024 * 1024)))
+    pct = float(os.environ.get("DISK_RESERVE_PERCENT", "1.0"))
+    return max(fixed, int(u.total * pct / 100.0))
+
+
+def download_folder_usage_bytes(path: Path) -> int:
+    total = 0
+    if not path.is_dir():
+        return 0
+    try:
+        for p in path.rglob("*"):
+            try:
+                if p.is_file() and not p.is_symlink():
+                    total += p.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return total
+
+
+def _remove_aria2_download_best_effort(svc: Any, gid: str) -> None:
+    try:
+        svc.call("aria2.remove", [gid])
+    except Aria2RPCError:
+        try:
+            svc.call("aria2.removeDownloadResult", [gid])
+        except Aria2RPCError:
+            pass
+
+
+def wait_for_torrent_total_length(svc: Any, gid: str, timeout: float = 120.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            st = svc.call(
+                "aria2.tellStatus",
+                [gid, ["totalLength", "status", "errorMessage", "errorCode"]],
+            )
+        except Aria2RPCError:
+            time.sleep(0.35)
+            continue
+        if not isinstance(st, dict):
+            time.sleep(0.35)
+            continue
+        if st.get("status") == "error":
+            msg = st.get("errorMessage") or st.get("errorCode") or "unknown error"
+            _remove_aria2_download_best_effort(svc, gid)
+            raise Aria2RPCError(f"Torrent failed: {msg}")
+        tl = int(st.get("totalLength") or 0)
+        if tl > 0:
+            return tl
+        time.sleep(0.35)
+    _remove_aria2_download_best_effort(svc, gid)
+    raise Aria2RPCError(
+        "Timeout waiting for torrent size (metadata). "
+        "Try again, or add &xl=BYTES to the magnet if the indexer provides it."
+    )
 
 
 def create_app() -> Flask:
@@ -153,7 +224,7 @@ def create_app() -> Flask:
     @limiter.limit("12 per minute", methods=["POST"], error_message="Too many login attempts.")
     def login():
         if require_auth():
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("overview"))
         error = None
         if request.method == "POST":
             pw = request.form.get("password", "")
@@ -162,7 +233,7 @@ def create_app() -> Flask:
                 session["auth"] = True
                 session.permanent = True
                 session["_fresh"] = secrets.token_hex(16)
-                return redirect(url_for("dashboard"))
+                return redirect(url_for("overview"))
             error = "Invalid credentials."
         return render_template("login.html", error=error)
 
@@ -172,7 +243,27 @@ def create_app() -> Flask:
         return redirect(url_for("login"))
 
     @app.route("/")
-    def dashboard():
+    def overview():
+        if not require_auth():
+            return redirect(url_for("login"))
+        return render_template(
+            "overview.html",
+            download_dir=str(DOWNLOAD_DIR),
+            nav="overview",
+        )
+
+    @app.route("/torrents")
+    def torrents_page():
+        if not require_auth():
+            return redirect(url_for("login"))
+        return render_template(
+            "torrents.html",
+            download_dir=str(DOWNLOAD_DIR),
+            nav="torrents",
+        )
+
+    @app.route("/files")
+    def files_page():
         if not require_auth():
             return redirect(url_for("login"))
         rel = request.args.get("path", "").strip().strip("/")
@@ -185,11 +276,12 @@ def create_app() -> Flask:
             if parent_rel == ".":
                 parent_rel = ""
         return render_template(
-            "dashboard.html",
+            "files.html",
             download_dir=str(DOWNLOAD_DIR),
             current_path=rel,
             parent_path=parent_rel,
             entries=entries,
+            nav="files",
         )
 
     def _list_files(root: Path, safe_fn, rel: str) -> list[dict]:
@@ -240,30 +332,139 @@ def create_app() -> Flask:
             return jsonify({"error": str(e)}), 503
         return jsonify({"downloads": data, "meta": gs})
 
+    @app.route("/api/fs/stats", methods=["GET"])
+    @limiter.limit("120 per minute")
+    def api_fs_stats():
+        _auth_json()
+        try:
+            du = shutil.disk_usage(DOWNLOAD_DIR)
+        except OSError as e:
+            return jsonify({"error": str(e)}), 500
+        reserve = _disk_reserve(du)
+        free_eff = max(0, du.free - reserve)
+        folder_used = download_folder_usage_bytes(DOWNLOAD_DIR)
+        return jsonify(
+            {
+                "download_dir": str(DOWNLOAD_DIR),
+                "volume": {
+                    "total_bytes": du.total,
+                    "used_bytes": du.used,
+                    "free_bytes": du.free,
+                    "total_human": _human_bytes(du.total),
+                    "used_human": _human_bytes(du.used),
+                    "free_human": _human_bytes(du.free),
+                    "reserve_bytes": reserve,
+                    "reserve_human": _human_bytes(reserve),
+                    "free_effective_bytes": free_eff,
+                    "free_effective_human": _human_bytes(free_eff),
+                    "used_fraction": round(du.used / du.total, 4) if du.total else 0.0,
+                },
+                "folder": {
+                    "used_bytes": folder_used,
+                    "used_human": _human_bytes(folder_used),
+                },
+            }
+        )
+
     @app.route("/api/torrents/add", methods=["POST"])
     @limiter.limit("60 per minute")
     def api_torrents_add():
         _auth_json()
         body = request.get_json(silent=True) or {}
         magnet = (request.form.get("magnet") or body.get("magnet") or "").strip()
-        if not magnet.startswith("magnet:?xt=urn:btih:"):
-            return jsonify({"error": "Invalid magnet (must start with magnet:?xt=urn:btih:)"}), 400
-        options: dict[str, Any] = {}
-        subdir = (body.get("subdir") or request.form.get("subdir") or "").strip().strip("/")
-        if subdir and ".." not in subdir.split("/"):
-            target = (DOWNLOAD_DIR / subdir).resolve()
-            if safe_under_root(DOWNLOAD_DIR, target):
-                target.mkdir(parents=True, exist_ok=True)
-                options["dir"] = str(target)
-        # Do not seed after finished (global defaults; BitTorrent may still upload while downloading).
-        options["seed-time"] = os.environ.get("ARIA2_SEED_TIME", "0")
-        options["seed-ratio"] = os.environ.get("ARIA2_SEED_RATIO", "0")
+        if not magnet.lower().startswith("magnet:"):
+            return jsonify({"error": "Invalid magnet URI"}), 400
+        try:
+            parsed = parse_magnet(magnet)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if not parsed.get("btih"):
+            return jsonify({"error": "Could not parse info-hash (xt=urn:btih:…) from magnet"}), 400
+
+        parent_rel = (
+            body.get("parent")
+            or body.get("subdir")
+            or request.form.get("parent")
+            or request.form.get("subdir")
+            or ""
+        )
+        parent_rel = str(parent_rel).strip().strip("/")
+
+        base = DOWNLOAD_DIR
+        if parent_rel:
+            if ".." in parent_rel.split("/"):
+                return jsonify({"error": "Invalid parent path"}), 400
+            p = (DOWNLOAD_DIR / parent_rel).resolve()
+            parent_safe = safe_under_root(DOWNLOAD_DIR, p)
+            if parent_safe is None:
+                return jsonify({"error": "Invalid parent path"}), 400
+            base = parent_safe
+            base.mkdir(parents=True, exist_ok=True)
+
+        folder_label = auto_subfolder_name(parsed.get("dn"), str(parsed["btih"]))
+        final_dir = pick_unique_dir(base, folder_label)
+
+        du = shutil.disk_usage(DOWNLOAD_DIR)
+        reserve = _disk_reserve(du)
+        free_effective = max(0, du.free - reserve)
+
+        options: dict[str, Any] = {
+            "dir": str(final_dir),
+            "seed-time": os.environ.get("ARIA2_SEED_TIME", "0"),
+            "seed-ratio": os.environ.get("ARIA2_SEED_RATIO", "0"),
+        }
+
+        xl_bytes = parsed.get("xl")
+        need_metadata = not (isinstance(xl_bytes, int) and xl_bytes > 0)
+
+        if isinstance(xl_bytes, int) and xl_bytes > 0:
+            if xl_bytes > free_effective:
+                return jsonify(
+                    {
+                        "error": (
+                            f"Not enough free space (after reserve). Need {_human_bytes(xl_bytes)}, "
+                            f"effective free {_human_bytes(free_effective)}."
+                        ),
+                        "need_bytes": xl_bytes,
+                        "free_effective_bytes": free_effective,
+                    }
+                ), 400
+        else:
+            options["pause"] = "true"
+
         try:
             svc = ensure_aria2()
             gid = svc.call("aria2.addUri", [[magnet], options])
         except Aria2RPCError as e:
             return jsonify({"error": str(e)}), 503
-        return jsonify({"ok": True, "gid": gid})
+
+        if need_metadata:
+            try:
+                total_len = wait_for_torrent_total_length(svc, gid)
+            except Aria2RPCError as e:
+                return jsonify({"error": str(e)}), 400
+            du2 = shutil.disk_usage(DOWNLOAD_DIR)
+            reserve2 = _disk_reserve(du2)
+            free2 = max(0, du2.free - reserve2)
+            if total_len > free2:
+                _remove_aria2_download_best_effort(svc, gid)
+                return jsonify(
+                    {
+                        "error": (
+                            f"Not enough free space for this torrent (~{_human_bytes(total_len)}). "
+                            f"Effective free {_human_bytes(free2)}."
+                        ),
+                        "need_bytes": total_len,
+                        "free_effective_bytes": free2,
+                    }
+                ), 400
+            try:
+                svc.call("aria2.unpause", [gid])
+            except Aria2RPCError as e:
+                return jsonify({"error": str(e)}), 503
+
+        rel_dir = str(final_dir.relative_to(DOWNLOAD_DIR)).replace("\\", "/")
+        return jsonify({"ok": True, "gid": gid, "save_folder": rel_dir})
 
     @app.route("/api/torrents/<gid>/pause", methods=["POST"])
     def api_torrent_pause(gid: str):
@@ -400,7 +601,14 @@ def create_app() -> Flask:
         full = safe_under_root(DOWNLOAD_DIR, (DOWNLOAD_DIR / rel_path).resolve())
         if full is None or not full.is_file():
             abort(404)
-        return send_from_directory(full.parent, full.name, as_attachment=True)
+        # conditional=True enables HTTP Range (206) + Accept-Ranges — required for IDM/FDM multi-connection segmented downloads
+        return send_file(
+            full,
+            as_attachment=True,
+            download_name=full.name,
+            conditional=True,
+            etag=True,
+        )
 
     return app
 

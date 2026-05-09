@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block extra_head %}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% block app_extra_head %}{% endblock %}
+{% endblock %}
+{% block body %}
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <strong>Torrent</strong>
+      <span class="muted small sidebar-path">{{ download_dir }}</span>
+    </div>
+    <nav class="sidebar-nav">
+      <a href="{{ url_for('overview') }}" class="nav-link {% if nav == 'overview' %}is-active{% endif %}">Overview</a>
+      <a href="{{ url_for('torrents_page') }}" class="nav-link {% if nav == 'torrents' %}is-active{% endif %}">Transfers</a>
+      <a href="{{ url_for('files_page') }}" class="nav-link {% if nav == 'files' %}is-active{% endif %}">Files</a>
+    </nav>
+    <div class="sidebar-footer">
+      <form method="post" action="{{ url_for('logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+        <button type="submit" class="btn ghost btn-block">Log out</button>
+      </form>
+    </div>
+  </aside>
+  <div class="app-main">
+    <header class="main-header">
+      <h1 class="page-heading">{% block page_heading %}Dashboard{% endblock %}</h1>
+    </header>
+    {% block app_content %}{% endblock %}
+  </div>
+</div>
+{% endblock %}

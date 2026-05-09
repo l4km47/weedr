@@ -274,11 +274,37 @@ def get_service(
 
 
 def format_speed(bps: int) -> str:
-    if bps >= 1_048_576:
-        return f"{bps / 1_048_576:.2f} MiB/s"
+    if bps >= 1 << 30:
+        return f"{bps / (1 << 30):.2f} GiB/s"
+    if bps >= 1 << 20:
+        return f"{bps / (1 << 20):.2f} MiB/s"
     if bps >= 1024:
         return f"{bps / 1024:.1f} KiB/s"
     return f"{bps} B/s"
+
+
+def _parse_bps_value(v: Any) -> int:
+    if v is None:
+        return 0
+    try:
+        return int(str(v).strip())
+    except ValueError:
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return 0
+
+
+def enrich_global_stat(stats: dict[str, Any]) -> dict[str, Any]:
+    """Add human-readable speeds; aria2 returns global speeds as string integers."""
+    out = dict(stats)
+    ds = _parse_bps_value(out.get("downloadSpeed"))
+    us = _parse_bps_value(out.get("uploadSpeed"))
+    out["downloadSpeed_bps"] = ds
+    out["uploadSpeed_bps"] = us
+    out["download_speed_human"] = format_speed(ds)
+    out["upload_speed_human"] = format_speed(us)
+    return out
 
 
 def format_eta(seconds: int | None) -> str:
@@ -411,6 +437,7 @@ def global_stat(svc: Aria2Service) -> dict[str, Any]:
         stats = svc.call("aria2.getGlobalStat") or {}
     except Aria2RPCError:
         stats = {}
+    stats = enrich_global_stat(stats) if stats else stats
     try:
         ver = svc.call("aria2.getVersion") or {}
     except Aria2RPCError:

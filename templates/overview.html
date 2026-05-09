@@ -1,0 +1,98 @@
+{% extends "layout_app.html" %}
+{% block title %}Overview · Torrent{% endblock %}
+{% block page_heading %}Overview{% endblock %}
+{% block app_content %}
+<main class="stack-main">
+  <section class="card" id="disk-card">
+    <h2>Disk</h2>
+    <p class="muted small">Volume = filesystem that holds your download folder. “Downloads folder” = space used by files under that path (scan; can be slow on huge trees).</p>
+    <div id="disk-stats" class="disk-stats muted small">Loading…</div>
+    <div class="disk-bar-wrap" title="Volume used / total">
+      <div id="disk-bar" class="disk-bar" style="width:0%"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Add magnet</h2>
+    <p class="muted small">Each torrent is saved in its <strong>own subfolder</strong> (name from <code>dn=</code> in the magnet, or <code>torrent-&lt;hash&gt;</code>). Optional parent groups folders under a path you choose. Size is checked: magnets with <code>&amp;xl=</code> are verified immediately; others pause until metadata is known, then the download starts only if there is room (a reserve is kept for the OS).</p>
+    <form id="magnet-form" class="stack">
+      <label for="magnet">Magnet link</label>
+      <textarea id="magnet" name="magnet" rows="3" placeholder="magnet:?xt=urn:btih:..." required></textarea>
+      <label for="parent">Optional parent folder (under downloads)</label>
+      <input type="text" id="parent" name="parent" placeholder="e.g. linux/isos" autocomplete="off">
+      <button type="submit" class="btn primary">Add torrent</button>
+    </form>
+    <p id="magnet-msg" class="small hidden"></p>
+  </section>
+</main>
+
+<script>
+(function () {
+  const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+  function headersJson() {
+    return { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken };
+  }
+  const diskStats = document.getElementById('disk-stats');
+  const diskBar = document.getElementById('disk-bar');
+  const magnetForm = document.getElementById('magnet-form');
+  const magnetMsg = document.getElementById('magnet-msg');
+
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function renderDisk(data) {
+    if (!data || !data.volume) {
+      diskStats.textContent = 'No data';
+      return;
+    }
+    const v = data.volume;
+    const f = data.folder || {};
+    const pct = Math.min(100, Math.round((v.used_fraction || 0) * 1000) / 10);
+    diskBar.style.width = pct + '%';
+    diskStats.innerHTML =
+      '<div><strong>Volume</strong> — used ' + esc(v.used_human) + ' / ' + esc(v.total_human) +
+      ' · free ' + esc(v.free_human) + ' · effective free (after reserve) ' + esc(v.free_effective_human) + '</div>' +
+      '<div><strong>Downloads folder</strong> — ' + esc(f.used_human) + ' used under this tree</div>';
+  }
+
+  async function pollDisk() {
+    try {
+      const res = await fetch('{{ url_for("api_fs_stats") }}');
+      if (!res.ok) return;
+      renderDisk(await res.json());
+    } catch (_) {}
+  }
+
+  magnetForm.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    magnetMsg.classList.add('hidden');
+    const magnet = document.getElementById('magnet').value.trim();
+    const parent = document.getElementById('parent').value.trim();
+    const res = await fetch('{{ url_for("api_torrents_add") }}', {
+      method: 'POST',
+      headers: headersJson(),
+      body: JSON.stringify({ magnet, parent }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      magnetMsg.textContent = data.error || res.statusText;
+      magnetMsg.classList.remove('hidden');
+      magnetMsg.classList.add('error');
+      return;
+    }
+    var extra = data.save_folder ? (' Saved under: ' + data.save_folder + '.') : '';
+    magnetMsg.textContent = 'Added (gid ' + data.gid + ').' + extra;
+    magnetMsg.classList.remove('hidden', 'error');
+    magnetMsg.classList.add('ok');
+    magnetForm.reset();
+    pollDisk();
+  });
+
+  pollDisk();
+  setInterval(pollDisk, 8000);
+})();
+</script>
+{% endblock %}
