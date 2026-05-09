@@ -610,6 +610,29 @@ pre.log {
   flex: 1;
   min-width: 0;
   padding: 1.25rem 1.25rem 2.5rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.site-footer {
+  margin-top: auto;
+  padding-top: 2rem;
+}
+
+.site-footer-line {
+  margin: 0;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+}
+
+.auth-wrap .site-footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 1.25rem;
+  margin-top: 0;
+  padding-top: 0;
+  text-align: center;
 }
 
 .main-header {
