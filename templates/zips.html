@@ -1,0 +1,125 @@
+{% extends "layout_app.html" %}
+{% block title %}Zips · weedr{% endblock %}
+{% block page_heading %}Zip archives{% endblock %}
+{% block page_sub %}<p class="page-sub">Finished archives are stored on disk (see path below). Delete rows to reclaim space; jobs still <strong>building</strong> cannot be removed until they finish.</p>{% endblock %}
+{% block app_content %}
+<main class="stack-main">
+  <section class="card-pro">
+    <div class="card-head card-head-row">
+      <h2 class="card-title">All zips</h2>
+      <span class="muted small mono zip-storage-path" title="ZIP_STORAGE_DIR">{{ zip_storage_dir }}</span>
+      <button type="button" id="zip-list-refresh" class="btn btn-sm">Refresh</button>
+    </div>
+    <div id="zip-list-wrap" class="card-body"><p class="muted small">Loading…</p></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+  function headersJson() {
+    return { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken };
+  }
+  const listUrl = {{ url_for('api_fs_zip_list') | tojson }};
+  const deleteUrlPattern = {{ url_for('api_fs_zip_delete', job_id='__ID__') | tojson }};
+  const filesPageUrl = {{ url_for('files_page') | tojson }};
+  let pollTimer = null;
+
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  function deleteUrl(jobId) {
+    return deleteUrlPattern.replace('__ID__', encodeURIComponent(jobId));
+  }
+
+  function statusLabel(row) {
+    var st = row.status;
+    if (st === 'stored') return 'Stored';
+    if (st === 'queued') return 'Queued';
+    if (st === 'running') return 'Building ' + (typeof row.progress === 'number' ? row.progress.toFixed(1) + '%' : '');
+    if (st === 'done') return 'Ready';
+    if (st === 'error') return 'Failed';
+    return esc(st || '—');
+  }
+
+  function render(items) {
+    const wrap = document.getElementById('zip-list-wrap');
+    if (!items.length) {
+      wrap.innerHTML = '<p class="muted">No archives yet. Create zips from the <a href="' + esc(filesPageUrl) + '">Files</a> browser.</p>';
+      return;
+    }
+    let h = '<div class="table-wrap"><table class="data-table"><thead><tr>';
+    h += '<th>Archive</th><th>Folder</th><th>Size</th><th>Status</th><th></th>';
+    h += '</tr></thead><tbody>';
+    items.forEach(function (row) {
+      const jid = esc(row.job_id);
+      const dn = esc(row.download_name || '');
+      const rp = esc(row.rel_path || '');
+      const sz = esc(row.zip_size_human || '—');
+      const st = row.status;
+      const canDelete = st !== 'running';
+      const dl = row.download_url ? '<a href="' + esc(row.download_url) + '" class="btn btn-sm">Download</a>' : '';
+      const delBtn = canDelete
+        ? '<button type="button" class="btn btn-sm danger zip-del" data-job-id="' + jid + '">Delete</button>'
+        : '<span class="muted small">Wait…</span>';
+      const folderCell = rp
+        ? '<a href="' + esc(filesPageUrl + '?path=' + encodeURIComponent(row.rel_path)) + '" class="link-quiet">' + rp + '</a>'
+        : '<span class="muted">—</span>';
+      var detail = '';
+      if (st === 'running' || st === 'queued') {
+        detail = '<div class="muted small">' + esc(row.processed_human || '') + ' / ' + esc(row.total_human || '') + '</div>';
+      }
+      if (st === 'error' && row.error) {
+        detail = '<div class="small error">' + esc(row.error) + '</div>';
+      }
+      if (row.orphan) {
+        detail += '<div class="muted small">Recovered from disk (no job state)</div>';
+      }
+      h += '<tr data-job-id="' + jid + '">';
+      h += '<td class="mono small">' + dn + '</td>';
+      h += '<td>' + folderCell + '</td>';
+      h += '<td class="tab-num">' + sz + '</td>';
+      h += '<td>' + statusLabel(row) + detail + '</td>';
+      h += '<td class="nowrap">' + dl + ' ' + delBtn + '</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+    wrap.innerHTML = h;
+    wrap.querySelectorAll('button.zip-del').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const id = btn.getAttribute('data-job-id');
+        if (!id) return;
+        if (!confirm('Delete this archive from the server?')) return;
+        const res = await fetch(deleteUrl(id), { method: 'DELETE', headers: headersJson() });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok) {
+          alert(data.error || res.statusText);
+          return;
+        }
+        loadList();
+      });
+    });
+  }
+
+  async function loadList() {
+    try {
+      const res = await fetch(listUrl);
+      if (res.status === 401) return;
+      const data = await res.json();
+      const items = data.items || [];
+      render(items);
+      var busy = items.some(function (r) { return r.status === 'queued' || r.status === 'running'; });
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = null;
+      if (busy) pollTimer = setInterval(loadList, 2000);
+    } catch (_) {}
+  }
+
+  document.getElementById('zip-list-refresh').addEventListener('click', loadList);
+  loadList();
+})();
+</script>
+{% endblock %}

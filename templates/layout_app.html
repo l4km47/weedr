@@ -20,6 +20,7 @@
       <a href="{{ url_for('overview') }}" class="nav-link {% if nav == 'overview' %}is-active{% endif %}"><span class="nav-label">Overview</span><span class="nav-hint">Storage &amp; HTTP</span></a>
       <a href="{{ url_for('torrents_page') }}" class="nav-link {% if nav == 'torrents' %}is-active{% endif %}"><span class="nav-label">Transfers</span><span class="nav-hint">Queue &amp; speeds</span></a>
       <a href="{{ url_for('files_page') }}" class="nav-link {% if nav == 'files' %}is-active{% endif %}"><span class="nav-label">Files</span><span class="nav-hint">Browse &amp; grab</span></a>
+      <a href="{{ url_for('zips_page') }}" class="nav-link {% if nav == 'zips' %}is-active{% endif %}"><span class="nav-label">Zips</span><span class="nav-hint">Archives &amp; cleanup</span></a>
       <a href="{{ url_for('activity_page') }}" class="nav-link {% if nav == 'activity' %}is-active{% endif %}"><span class="nav-label">HTTP activity</span><span class="nav-hint">Who’s downloading</span></a>
     </nav>
     <div class="sidebar-footer">

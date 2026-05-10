@@ -5,10 +5,10 @@ file management, hardened authentication (Argon2, CSRF, secure cookies, rate lim
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import shutil
-import tempfile
 import threading
 import time
 import zipfile
@@ -61,8 +61,21 @@ _init_password_store()
 
 DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", Path.home() / "torrents")).expanduser().resolve()
 
+ZIP_STORAGE_DIR = Path(
+    os.environ.get("ZIP_STORAGE_DIR", str(DOWNLOAD_DIR.parent / ".weedr-zip-store"))
+).expanduser().resolve()
+
+ZIP_MAX_CONCURRENT = max(1, int(os.environ.get("ZIP_MAX_CONCURRENT", "2")))
+_zip_worker_sem = threading.BoundedSemaphore(ZIP_MAX_CONCURRENT)
+# Zip job state lives in memory (single-process). Use one gunicorn worker or shared storage if you scale out.
+
 _file_download_lock = threading.Lock()
 _active_http_downloads: dict[str, dict[str, Any]] = {}
+
+_zip_jobs_lock = threading.Lock()
+_zip_jobs: dict[str, dict[str, Any]] = {}
+_zip_active_by_path: dict[str, str] = {}
+_zip_done_by_path: dict[str, str] = {}
 
 
 def summarize_http_downloads(flat: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -159,6 +172,140 @@ def download_folder_usage_bytes(path: Path) -> int:
     except OSError:
         pass
     return total
+
+
+def _zip_blob_path(job_id: str) -> Path:
+    return ZIP_STORAGE_DIR / f"{job_id}.zip"
+
+
+def _zip_meta_path(job_id: str) -> Path:
+    return ZIP_STORAGE_DIR / f"{job_id}.json"
+
+
+def _delete_zip_artifacts(job_id: str) -> None:
+    _zip_blob_path(job_id).unlink(missing_ok=True)
+    _zip_meta_path(job_id).unlink(missing_ok=True)
+
+
+def _read_zip_meta(job_id: str) -> dict[str, Any]:
+    p = _zip_meta_path(job_id)
+    if not p.is_file():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _collect_zip_entries(folder: Path) -> tuple[list[tuple[Path, str]], int]:
+    """Regular files under folder (no symlinks); returns (path, arcname) list and total raw bytes."""
+    entries: list[tuple[Path, str]] = []
+    total = 0
+    try:
+        for path in sorted(folder.rglob("*"), key=lambda p: str(p).lower()):
+            if path.is_symlink():
+                continue
+            if not path.is_file():
+                continue
+            try:
+                arcname = path.relative_to(folder).as_posix()
+                sz = path.stat().st_size
+            except (ValueError, OSError):
+                continue
+            entries.append((path, arcname))
+            total += sz
+    except OSError:
+        pass
+    return entries, total
+
+
+def _run_zip_job_worker(job_id: str, rel_path: str, full: Path, download_name: str) -> None:
+    zip_path = _zip_blob_path(job_id)
+    try:
+        if job_id not in _zip_jobs:
+            return
+        entries, total_raw = _collect_zip_entries(full)
+        with _zip_jobs_lock:
+            j = _zip_jobs.get(job_id)
+            if j:
+                j["total_bytes"] = total_raw
+                j["processed_bytes"] = 0
+                j["progress"] = 0.0
+
+        if not entries:
+            with zipfile.ZipFile(
+                zip_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=6,
+            ) as zf:
+                dn = (full.name or "folder").strip("/") or "folder"
+                zi = zipfile.ZipInfo(dn + "/")
+                zi.external_attr = 0o40755 << 16
+                zf.writestr(zi, b"")
+        else:
+            processed = 0
+            with zipfile.ZipFile(
+                zip_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=6,
+            ) as zf:
+                for abs_path, arcname in entries:
+                    if job_id not in _zip_jobs:
+                        zip_path.unlink(missing_ok=True)
+                        return
+                    zf.write(abs_path, arcname=arcname)
+                    try:
+                        processed += abs_path.stat().st_size
+                    except OSError:
+                        pass
+                    pct = (processed / total_raw * 100.0) if total_raw > 0 else 100.0
+                    with _zip_jobs_lock:
+                        jj = _zip_jobs.get(job_id)
+                        if jj:
+                            jj["processed_bytes"] = processed
+                            jj["progress"] = min(99.99, pct)
+
+        meta = {
+            "download_name": download_name,
+            "rel_path": rel_path,
+            "finished": datetime.now(timezone.utc).isoformat(),
+        }
+        _zip_meta_path(job_id).write_text(json.dumps(meta), encoding="utf-8")
+
+        with _zip_jobs_lock:
+            jj = _zip_jobs.get(job_id)
+            if jj:
+                jj["status"] = "done"
+                jj["progress"] = 100.0
+                jj["processed_bytes"] = total_raw if entries else 0
+                jj["total_bytes"] = total_raw
+            _zip_done_by_path[rel_path] = job_id
+            _zip_active_by_path.pop(rel_path, None)
+    except Exception as e:
+        _delete_zip_artifacts(job_id)
+        with _zip_jobs_lock:
+            jj = _zip_jobs.get(job_id)
+            if jj:
+                jj["status"] = "error"
+                jj["error"] = str(e)
+                jj["progress"] = 0.0
+            _zip_active_by_path.pop(rel_path, None)
+
+
+def _zip_thread_entry(job_id: str, rel_path: str, full: Path, download_name: str) -> None:
+    with _zip_worker_sem:
+        with _zip_jobs_lock:
+            if job_id not in _zip_jobs:
+                return
+            j = _zip_jobs.get(job_id)
+            if j:
+                j["status"] = "running"
+        if job_id not in _zip_jobs:
+            return
+        _run_zip_job_worker(job_id, rel_path, full, download_name)
 
 
 def _remove_aria2_download_best_effort(svc: Any, gid: str) -> None:
@@ -363,6 +510,17 @@ def create_app() -> Flask:
             "activity.html",
             download_dir=str(DOWNLOAD_DIR),
             nav="activity",
+        )
+
+    @app.route("/zips")
+    def zips_page():
+        if not require_auth():
+            return redirect(url_for("login"))
+        return render_template(
+            "zips.html",
+            download_dir=str(DOWNLOAD_DIR),
+            zip_storage_dir=str(ZIP_STORAGE_DIR),
+            nav="zips",
         )
 
     def _list_files(root: Path, safe_fn, rel: str) -> list[dict]:
@@ -687,23 +845,18 @@ def create_app() -> Flask:
             return jsonify({"error": str(e)}), 400
         return jsonify({"ok": True})
 
-    @app.route("/files/<path:rel_path>/zip")
-    @limiter.limit("24 per minute")
-    def download_folder_zip(rel_path: str):
-        """
-        Zip a folder under DOWNLOAD_DIR and send as attachment.
-
-        Builds a temporary .zip on disk (needs free space ~ compressed size).
-        Uncompressed total size is capped by ZIP_FOLDER_MAX_BYTES (default 10 GiB).
-        """
-        if not require_auth():
-            abort(401)
-        rel_path = rel_path.strip().strip("/")
-        if not rel_path or ".." in rel_path.split("/"):
-            abort(400)
-        full = safe_under_root(DOWNLOAD_DIR, (DOWNLOAD_DIR / rel_path).resolve())
+    @app.route("/api/fs/zip/start", methods=["POST"])
+    @limiter.limit("12 per minute")
+    def api_fs_zip_start():
+        """Queue a background zip of a folder; poll /api/fs/zip/status/<job_id> for progress."""
+        _auth_json()
+        body = request.get_json(silent=True) or {}
+        rel = (body.get("path") or "").strip().strip("/")
+        if not rel or ".." in rel.split("/"):
+            return jsonify({"error": "Invalid path"}), 400
+        full = safe_under_root(DOWNLOAD_DIR, (DOWNLOAD_DIR / rel).resolve())
         if full is None or not full.is_dir():
-            abort(404)
+            return jsonify({"error": "Not found"}), 404
 
         max_raw = int(os.environ.get("ZIP_FOLDER_MAX_BYTES", str(10 * 1024 * 1024 * 1024)))
         total_raw = download_folder_usage_bytes(full)
@@ -720,59 +873,265 @@ def create_app() -> Flask:
                 413,
             )
 
-        fd, tmp_name = tempfile.mkstemp(suffix=".zip")
-        os.close(fd)
-        tmp_path = Path(tmp_name)
         try:
-            with zipfile.ZipFile(
-                tmp_path,
-                mode="w",
-                compression=zipfile.ZIP_DEFLATED,
-                compresslevel=6,
-            ) as zf:
-                wrote_any = False
-                for path in sorted(full.rglob("*"), key=lambda p: str(p).lower()):
-                    if path.is_symlink():
-                        continue
-                    if not path.is_file():
-                        continue
-                    try:
-                        arcname = path.relative_to(full).as_posix()
-                    except ValueError:
-                        continue
-                    try:
-                        zf.write(path, arcname=arcname)
-                        wrote_any = True
-                    except OSError:
-                        continue
-                if not wrote_any:
-                    dn = (full.name or "folder").strip("/") or "folder"
-                    zi = zipfile.ZipInfo(dn + "/")
-                    zi.external_attr = 0o40755 << 16
-                    zf.writestr(zi, b"")
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+            ZIP_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return jsonify({"error": f"Cannot create zip storage: {e}"}), 500
 
-        safe_base = (full.name or "folder").replace("/", "_").replace("\\", "_") or "folder"
-        download_name = safe_base + ".zip"
+        safe_dn = (full.name or "folder").replace("/", "_").replace("\\", "_") or "folder"
+        download_name = safe_dn + ".zip"
+        now = datetime.now(timezone.utc).isoformat()
 
+        with _zip_jobs_lock:
+            active = _zip_active_by_path.get(rel)
+            if active:
+                aj = _zip_jobs.get(active)
+                if aj and aj.get("status") in ("queued", "running"):
+                    return jsonify(
+                        {
+                            "job_id": active,
+                            "status": aj.get("status"),
+                            "dedup": True,
+                            "message": "A zip for this folder is already in progress.",
+                        }
+                    )
+
+            prev_done = _zip_done_by_path.pop(rel, None)
+            if prev_done:
+                _delete_zip_artifacts(prev_done)
+                _zip_jobs.pop(prev_done, None)
+
+            job_id = secrets.token_hex(12)
+            _zip_jobs[job_id] = {
+                "status": "queued",
+                "progress": 0.0,
+                "processed_bytes": 0,
+                "total_bytes": 0,
+                "rel_path": rel,
+                "folder_name": full.name or "folder",
+                "download_name": download_name,
+                "error": None,
+                "started": now,
+            }
+            _zip_active_by_path[rel] = job_id
+
+        threading.Thread(
+            target=_zip_thread_entry,
+            args=(job_id, rel, full, download_name),
+            daemon=True,
+        ).start()
+
+        return jsonify({"job_id": job_id, "status": "queued"})
+
+    @app.route("/api/fs/zip/status/<job_id>", methods=["GET"])
+    @limiter.limit("120 per minute")
+    def api_fs_zip_status(job_id: str):
+        if not require_auth():
+            abort(401)
+        job_id = job_id.strip()
+        if not job_id or len(job_id) > 48:
+            abort(400)
+        with _zip_jobs_lock:
+            j = _zip_jobs.get(job_id)
+        if j:
+            out = dict(j)
+            out["job_id"] = job_id
+            out["processed_human"] = _human_bytes(int(out.get("processed_bytes") or 0))
+            out["total_human"] = _human_bytes(int(out.get("total_bytes") or 0))
+            if out.get("status") == "done":
+                out["download_url"] = url_for("api_fs_zip_download", job_id=job_id)
+            return jsonify(out)
+        if _zip_blob_path(job_id).is_file():
+            meta = _read_zip_meta(job_id)
+            sz = _zip_blob_path(job_id).stat().st_size
+            return jsonify(
+                {
+                    "job_id": job_id,
+                    "status": "done",
+                    "progress": 100.0,
+                    "download_url": url_for("api_fs_zip_download", job_id=job_id),
+                    "rel_path": meta.get("rel_path", ""),
+                    "download_name": meta.get("download_name", "download.zip"),
+                    "zip_size_bytes": sz,
+                    "zip_size_human": _human_bytes(sz),
+                }
+            )
+        abort(404)
+
+    @app.route("/api/fs/zip/by-path", methods=["GET"])
+    @limiter.limit("120 per minute")
+    def api_fs_zip_by_path():
+        """Resume UI after refresh: active job or latest completed zip for a folder."""
+        if not require_auth():
+            abort(401)
+        rel = request.args.get("path", "").strip().strip("/")
+        if rel and ".." in rel.split("/"):
+            return jsonify({"error": "Invalid path"}), 400
+        if not rel:
+            return jsonify({"status": "none"})
+
+        with _zip_jobs_lock:
+            active_id = _zip_active_by_path.get(rel)
+            if active_id:
+                aj = _zip_jobs.get(active_id)
+                if aj and aj.get("status") in ("queued", "running"):
+                    out = dict(aj)
+                    out["job_id"] = active_id
+                    out["processed_human"] = _human_bytes(int(out.get("processed_bytes") or 0))
+                    out["total_human"] = _human_bytes(int(out.get("total_bytes") or 0))
+                    return jsonify(out)
+
+            done_id = _zip_done_by_path.get(rel)
+            if done_id and _zip_blob_path(done_id).is_file():
+                meta = _read_zip_meta(done_id)
+                return jsonify(
+                    {
+                        "status": "done",
+                        "job_id": done_id,
+                        "progress": 100.0,
+                        "download_url": url_for("api_fs_zip_download", job_id=done_id),
+                        "download_name": meta.get("download_name") or "download.zip",
+                        "rel_path": rel,
+                    }
+                )
+            if done_id:
+                _zip_done_by_path.pop(rel, None)
+
+        return jsonify({"status": "none"})
+
+    @app.route("/api/fs/zip/list", methods=["GET"])
+    @limiter.limit("60 per minute")
+    def api_fs_zip_list():
+        """All zip jobs (memory) plus orphan files on disk (e.g. after restart)."""
+        _auth_json()
+        rows: list[dict[str, Any]] = []
+
+        with _zip_jobs_lock:
+            snap: dict[str, dict[str, Any]] = {k: dict(v) for k, v in _zip_jobs.items()}
+
+        for jid, j in snap.items():
+            zp = _zip_blob_path(jid)
+            row: dict[str, Any] = {
+                "job_id": jid,
+                "status": j.get("status"),
+                "rel_path": j.get("rel_path", ""),
+                "folder_name": j.get("folder_name", ""),
+                "download_name": j.get("download_name", ""),
+                "progress": j.get("progress"),
+                "processed_bytes": j.get("processed_bytes"),
+                "total_bytes": j.get("total_bytes"),
+                "processed_human": _human_bytes(int(j.get("processed_bytes") or 0)),
+                "total_human": _human_bytes(int(j.get("total_bytes") or 0)),
+                "error": j.get("error"),
+                "started": j.get("started"),
+                "orphan": False,
+            }
+            if j.get("status") == "done" and zp.is_file():
+                row["download_url"] = url_for("api_fs_zip_download", job_id=jid)
+            elif j.get("status") == "done":
+                row["download_url"] = None
+            else:
+                row["download_url"] = None
+
+            if zp.is_file():
+                try:
+                    st = zp.stat()
+                    row["zip_size_bytes"] = st.st_size
+                    row["zip_size_human"] = _human_bytes(st.st_size)
+                    row["sort_ts"] = st.st_mtime
+                except OSError:
+                    row["sort_ts"] = 0
+            else:
+                row["sort_ts"] = 0
+            rows.append(row)
+
+        if ZIP_STORAGE_DIR.is_dir():
+            for zp in ZIP_STORAGE_DIR.glob("*.zip"):
+                jid = zp.stem
+                if jid in snap:
+                    continue
+                meta = _read_zip_meta(jid)
+                try:
+                    st = zp.stat()
+                    sz = st.st_size
+                    ts = st.st_mtime
+                except OSError:
+                    continue
+                rows.append(
+                    {
+                        "job_id": jid,
+                        "status": "stored",
+                        "rel_path": meta.get("rel_path", ""),
+                        "folder_name": "",
+                        "download_name": meta.get("download_name") or f"{jid}.zip",
+                        "progress": None,
+                        "processed_human": "",
+                        "total_human": "",
+                        "error": None,
+                        "started": None,
+                        "finished": meta.get("finished"),
+                        "orphan": True,
+                        "download_url": url_for("api_fs_zip_download", job_id=jid),
+                        "zip_size_bytes": sz,
+                        "zip_size_human": _human_bytes(sz),
+                        "sort_ts": ts,
+                    }
+                )
+
+        rows.sort(key=lambda r: float(r.get("sort_ts") or 0), reverse=True)
+        for r in rows:
+            r.pop("sort_ts", None)
+        return jsonify({"items": rows, "zip_storage_dir": str(ZIP_STORAGE_DIR)})
+
+    @app.route("/api/fs/zip/delete/<job_id>", methods=["DELETE"])
+    @limiter.limit("60 per minute")
+    def api_fs_zip_delete(job_id: str):
+        """Remove a finished zip from disk and indexes. Queued jobs are cancelled."""
+        _auth_json()
+        job_id = job_id.strip()
+        if not job_id or len(job_id) > 48:
+            return jsonify({"error": "Invalid job id"}), 400
+
+        with _zip_jobs_lock:
+            j = _zip_jobs.get(job_id)
+            if j and j.get("status") == "running":
+                return jsonify(
+                    {"error": "Cannot delete while zipping — wait until it finishes or fails."}
+                ), 409
+
+            _zip_jobs.pop(job_id, None)
+            for rp, jid in list(_zip_done_by_path.items()):
+                if jid == job_id:
+                    _zip_done_by_path.pop(rp, None)
+            for rp, jid in list(_zip_active_by_path.items()):
+                if jid == job_id:
+                    _zip_active_by_path.pop(rp, None)
+
+        _delete_zip_artifacts(job_id)
+        return jsonify({"ok": True})
+
+    @app.route("/api/fs/zip/download/<job_id>")
+    @limiter.limit("120 per minute")
+    def api_fs_zip_download(job_id: str):
+        """Download a finished zip from persistent ZIP_STORAGE_DIR (not a temp file)."""
+        if not require_auth():
+            abort(401)
+        job_id = job_id.strip()
+        if not job_id or len(job_id) > 48:
+            abort(400)
+        zp = _zip_blob_path(job_id)
+        if not zp.is_file():
+            abort(404)
+        meta = _read_zip_meta(job_id)
+        download_name = meta.get("download_name") or f"{job_id}.zip"
         resp = send_file(
-            tmp_path,
+            zp,
             as_attachment=True,
-            download_name=download_name,
+            download_name=str(download_name),
             mimetype="application/zip",
             max_age=0,
         )
         resp.headers["Cache-Control"] = "private, no-store"
-
-        def _unlink_zip() -> None:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-        resp.call_on_close(_unlink_zip)
         return resp
 
     @app.route("/files/<path:rel_path>")

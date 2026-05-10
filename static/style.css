@@ -717,6 +717,46 @@ pre.log {
   line-height: 1.35;
 }
 
+.zip-cell {
+  vertical-align: middle;
+}
+
+.zip-ui {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 7.5rem;
+  max-width: 14rem;
+}
+
+.zip-progress-track {
+  height: 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.zip-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent-dim), #5eead4);
+  transition: width 0.2s ease;
+}
+
+.zip-status-label {
+  display: block;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.zip-done {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
 .inline-heading {
   margin: 0;
   font-size: 1.05rem;

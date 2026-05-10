@@ -1,12 +1,13 @@
 {% extends "layout_app.html" %}
 {% block title %}Files · weedr{% endblock %}
 {% block page_heading %}Files{% endblock %}
-{% block page_sub %}<p class="page-sub">Everything on disk under your download folder — open files over HTTP, download a whole folder as a <strong>.zip</strong>, or delete to free space.</p>{% endblock %}
+{% block page_sub %}<p class="page-sub">Folders can be zipped <strong>in the background</strong>; watch progress, then download anytime from this page or bookmark the file — zips are stored until you zip that folder again.</p>{% endblock %}
 {% block app_content %}
 <main class="stack-main">
   <section class="card-pro files-browser">
-    <div class="card-head">
+    <div class="card-head card-head-row">
       <h2 class="card-title">Browse</h2>
+      <a href="{{ url_for('zips_page') }}" class="link-quiet small">Zip manager →</a>
       {% if parent_path or current_path %}
       <a href="{{ url_for('files_page', path=parent_path) if parent_path else url_for('files_page') }}" class="link-quiet small">↑ Parent</a>
       {% endif %}
@@ -47,9 +48,19 @@
               </td>
               <td class="muted tab-num">{% if e.size is not none %}{{ e.size | filesizeformat }}{% else %}—{% endif %}</td>
               <td class="muted small">{{ e.mtime }}</td>
-              <td class="actions nowrap">
+              <td class="zip-cell nowrap">
                 {% if e.is_dir %}
-                <a href="{{ url_for('download_folder_zip', rel_path=e.rel_path) }}" class="btn btn-sm">ZIP</a>
+                <div class="zip-ui" data-path="{{ e.rel_path }}">
+                  <button type="button" class="btn btn-sm zip-start">ZIP</button>
+                  <div class="zip-active hidden" aria-live="polite">
+                    <div class="zip-progress-track"><div class="zip-progress-fill" style="width:0%"></div></div>
+                    <span class="zip-status-label muted small"></span>
+                  </div>
+                  <div class="zip-done hidden">
+                    <a href="#" class="btn btn-sm zip-download">Download</a>
+                    <button type="button" class="btn btn-sm ghost zip-again">Again</button>
+                  </div>
+                </div>
                 {% else %}
                 <span class="muted">—</span>
                 {% endif %}
@@ -72,6 +83,141 @@
   function headersJson() {
     return { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken };
   }
+  const zipStartUrl = {{ url_for('api_fs_zip_start') | tojson }};
+  const zipByPathUrl = {{ url_for('api_fs_zip_by_path') | tojson }};
+  function zipStatusUrl(jobId) {
+    return {{ url_for('api_fs_zip_status', job_id='__JOB__') | tojson }}.replace('__JOB__', encodeURIComponent(jobId));
+  }
+
+  function showZipPhase(ui, phase) {
+    var startBtn = ui.querySelector('.zip-start');
+    var active = ui.querySelector('.zip-active');
+    var done = ui.querySelector('.zip-done');
+    if (startBtn) startBtn.classList.toggle('hidden', phase !== 'idle');
+    if (active) active.classList.toggle('hidden', phase !== 'active');
+    if (done) done.classList.toggle('hidden', phase !== 'done');
+  }
+
+  function setZipProgress(ui, pct, label) {
+    var fill = ui.querySelector('.zip-progress-fill');
+    var lab = ui.querySelector('.zip-status-label');
+    if (fill) fill.style.width = Math.min(100, Math.max(0, pct)) + '%';
+    if (lab) lab.textContent = label || '';
+  }
+
+  var zipPollers = {};
+  function stopZipPoll(jobId) {
+    if (jobId && zipPollers[jobId]) {
+      clearInterval(zipPollers[jobId]);
+      delete zipPollers[jobId];
+    }
+  }
+
+  function applyZipStatus(ui, data) {
+    var st = data.status;
+    if (st === 'queued' || st === 'running') {
+      showZipPhase(ui, 'active');
+      var pct = typeof data.progress === 'number' ? data.progress : 0;
+      var line = (st === 'queued' ? 'Queued…' : 'Zipping… ') + pct.toFixed(1) + '%';
+      if (data.total_human && data.processed_human) {
+        line += ' · ' + data.processed_human + ' / ' + data.total_human;
+      }
+      setZipProgress(ui, pct, line);
+      return;
+    }
+    if (st === 'done') {
+      stopZipPoll(data.job_id);
+      showZipPhase(ui, 'done');
+      var dl = ui.querySelector('.zip-download');
+      if (dl && data.download_url) {
+        dl.href = data.download_url;
+        dl.setAttribute('download', '');
+      }
+      setZipProgress(ui, 100, '');
+      return;
+    }
+    if (st === 'error') {
+      stopZipPoll(data.job_id);
+      showZipPhase(ui, 'idle');
+      alert(data.error || 'Zip failed');
+      return;
+    }
+  }
+
+  function pollZipJob(jobId, ui) {
+    if (ui.dataset.zipJobId && ui.dataset.zipJobId !== jobId) {
+      stopZipPoll(ui.dataset.zipJobId);
+    }
+    ui.dataset.zipJobId = jobId;
+    stopZipPoll(jobId);
+    zipPollers[jobId] = setInterval(async function () {
+      try {
+        var res = await fetch(zipStatusUrl(jobId));
+        if (!res.ok) return;
+        var data = await res.json();
+        applyZipStatus(ui, data);
+        if (data.status === 'done' || data.status === 'error') {
+          stopZipPoll(jobId);
+        }
+      } catch (_) {}
+    }, 450);
+  }
+
+  async function startZip(ui) {
+    var path = ui.getAttribute('data-path');
+    if (!path) return;
+    if (ui.dataset.zipJobId) stopZipPoll(ui.dataset.zipJobId);
+    var res = await fetch(zipStartUrl, {
+      method: 'POST',
+      headers: headersJson(),
+      body: JSON.stringify({ path: path }),
+    });
+    var data = await res.json().catch(function () { return {}; });
+    if (!res.ok) {
+      alert(data.error || res.statusText);
+      return;
+    }
+    var jid = data.job_id;
+    if (!jid) return;
+    showZipPhase(ui, 'active');
+    setZipProgress(ui, 0, data.dedup ? 'Already running…' : 'Starting…');
+    pollZipJob(jid, ui);
+    var once = await fetch(zipStatusUrl(jid));
+    if (once.ok) {
+      applyZipStatus(ui, await once.json());
+    }
+  }
+
+  async function refreshZipByPath(ui) {
+    var path = ui.getAttribute('data-path');
+    if (!path) return;
+    var res = await fetch(zipByPathUrl + '?path=' + encodeURIComponent(path));
+    if (!res.ok) return;
+    var data = await res.json();
+    if (data.status === 'none' || !data.status) {
+      showZipPhase(ui, 'idle');
+      return;
+    }
+    if (data.status === 'queued' || data.status === 'running') {
+      showZipPhase(ui, 'active');
+      applyZipStatus(ui, data);
+      if (data.job_id) pollZipJob(data.job_id, ui);
+      return;
+    }
+    if (data.status === 'done') {
+      applyZipStatus(ui, data);
+      return;
+    }
+  }
+
+  document.querySelectorAll('.zip-ui').forEach(function (ui) {
+    refreshZipByPath(ui);
+    var start = ui.querySelector('.zip-start');
+    var again = ui.querySelector('.zip-again');
+    if (start) start.addEventListener('click', function () { startZip(ui); });
+    if (again) again.addEventListener('click', function () { startZip(ui); });
+  });
+
   document.querySelectorAll('button.fs-del').forEach(function (btn) {
     btn.addEventListener('click', async function () {
       const tr = btn.closest('tr');
