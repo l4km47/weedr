@@ -1,7 +1,7 @@
 {% extends "layout_app.html" %}
 {% block title %}Zips · weedr{% endblock %}
 {% block page_heading %}Zip archives{% endblock %}
-{% block page_sub %}<p class="page-sub">Finished archives are stored on disk (see path below). Delete rows to reclaim space; jobs still <strong>building</strong> cannot be removed until they finish.</p>{% endblock %}
+{% block page_sub %}<p class="page-sub">Finished archives are stored on disk (see path below). Delete rows to reclaim space; use <strong>Cancel</strong> to stop a running zip.</p>{% endblock %}
 {% block app_content %}
 <main class="stack-main">
   <section class="card-pro">
@@ -10,6 +10,7 @@
       <span class="muted small mono zip-storage-path" title="ZIP_STORAGE_DIR">{{ zip_storage_dir }}</span>
       <button type="button" id="zip-list-refresh" class="btn btn-sm">Refresh</button>
     </div>
+    <p id="zip-retention-hint" class="muted small zip-retention-hint hidden"></p>
     <div id="zip-list-wrap" class="card-body"><p class="muted small">Loading…</p></div>
   </section>
 </main>
@@ -38,10 +39,14 @@
   function statusLabel(row) {
     var st = row.status;
     if (st === 'stored') return 'Stored';
-    if (st === 'queued') return 'Queued';
-    if (st === 'running') return 'Building ' + (typeof row.progress === 'number' ? row.progress.toFixed(1) + '%' : '');
+    if (st === 'queued') return row.cancel_requested ? 'Cancelling…' : 'Queued';
+    if (st === 'running') {
+      if (row.cancel_requested) return 'Cancelling…';
+      return 'Building ' + (typeof row.progress === 'number' ? row.progress.toFixed(1) + '%' : '');
+    }
     if (st === 'done') return 'Ready';
     if (st === 'error') return 'Failed';
+    if (st === 'cancelled') return 'Cancelled';
     return esc(st || '—');
   }
 
@@ -60,11 +65,17 @@
       const rp = esc(row.rel_path || '');
       const sz = esc(row.zip_size_human || '—');
       const st = row.status;
-      const canDelete = st !== 'running';
       const dl = row.download_url ? '<a href="' + esc(row.download_url) + '" class="btn btn-sm">Download</a>' : '';
-      const delBtn = canDelete
-        ? '<button type="button" class="btn btn-sm danger zip-del" data-job-id="' + jid + '">Delete</button>'
-        : '<span class="muted small">Wait…</span>';
+      var delBtn = '';
+      if (st === 'queued' || st === 'running') {
+        if (row.cancel_requested) {
+          delBtn = '<span class="muted small">Cancelling…</span>';
+        } else {
+          delBtn = '<button type="button" class="btn btn-sm danger zip-del" data-job-id="' + jid + '">Cancel</button>';
+        }
+      } else {
+        delBtn = '<button type="button" class="btn btn-sm danger zip-del" data-job-id="' + jid + '">Delete</button>';
+      }
       const folderCell = rp
         ? '<a href="' + esc(filesPageUrl + '?path=' + encodeURIComponent(row.rel_path)) + '" class="link-quiet">' + rp + '</a>'
         : '<span class="muted">—</span>';
@@ -92,7 +103,7 @@
       btn.addEventListener('click', async function () {
         const id = btn.getAttribute('data-job-id');
         if (!id) return;
-        if (!confirm('Delete this archive from the server?')) return;
+        if (!confirm('Remove this zip job from the server?')) return;
         const res = await fetch(deleteUrl(id), { method: 'DELETE', headers: headersJson() });
         const data = await res.json().catch(function () { return {}; });
         if (!res.ok) {
@@ -110,6 +121,17 @@
       if (res.status === 401) return;
       const data = await res.json();
       const items = data.items || [];
+      var rh = document.getElementById('zip-retention-hint');
+      if (rh) {
+        var hint = (data.retention_hint || '').trim();
+        if (hint) {
+          rh.textContent = 'Retention: ' + hint;
+          rh.classList.remove('hidden');
+        } else {
+          rh.textContent = '';
+          rh.classList.add('hidden');
+        }
+      }
       render(items);
       var busy = items.some(function (r) { return r.status === 'queued' || r.status === 'running'; });
       if (pollTimer) clearInterval(pollTimer);

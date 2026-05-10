@@ -4,6 +4,15 @@
 {% block app_extra_head %}{% endblock %}
 {% endblock %}
 {% block body %}
+<script>
+(function () {
+  try {
+    if (localStorage.getItem('weedr-theme') === 'light') {
+      document.body.classList.add('theme-light');
+    }
+  } catch (_) {}
+})();
+</script>
 <div class="app-shell">
   <aside class="sidebar">
     <div class="sidebar-brand">
@@ -24,10 +33,21 @@
       <a href="{{ url_for('activity_page') }}" class="nav-link {% if nav == 'activity' %}is-active{% endif %}"><span class="nav-label">HTTP activity</span><span class="nav-hint">Who’s downloading</span></a>
     </nav>
     <div class="sidebar-footer">
+      <button type="button" class="btn ghost btn-block btn-sm" id="theme-toggle">Toggle light theme</button>
       <form method="post" action="{{ url_for('logout') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
         <button type="submit" class="btn ghost btn-block">Log out</button>
       </form>
+      <script>
+      (function () {
+        var btn = document.getElementById('theme-toggle');
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+          var on = document.body.classList.toggle('theme-light');
+          try { localStorage.setItem('weedr-theme', on ? 'light' : 'dark'); } catch (_) {}
+        });
+      })();
+      </script>
     </div>
   </aside>
   <div class="app-main">

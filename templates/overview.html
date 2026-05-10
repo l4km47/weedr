@@ -17,6 +17,16 @@
     </div>
   </section>
 
+  <section class="card-pro" id="aria2-global-card">
+    <div class="card-head card-head-row">
+      <h2 class="card-title">aria2</h2>
+      <span class="muted small">Global options &amp; stats</span>
+    </div>
+    <div class="card-body">
+      <pre id="aria2-global-body" class="aria2-global-pre muted small">Loading…</pre>
+    </div>
+  </section>
+
   <section class="card-pro">
     <div class="card-head">
       <h2 class="card-title">HTTP downloads</h2>
@@ -34,6 +44,7 @@
   const diskStats = document.getElementById('disk-stats');
   const diskBar = document.getElementById('disk-bar');
   const activityPreview = document.getElementById('activity-preview');
+  const aria2Global = document.getElementById('aria2-global-body');
 
   function esc(s) {
     const d = document.createElement('div');
@@ -88,10 +99,53 @@
     } catch (_) {}
   }
 
+  function fmtAria2Global(data) {
+    if (!data) return 'No data';
+    var lines = [];
+    var wrap = data.global_stat || {};
+    var gs = wrap.global || {};
+    var go = data.global_option || {};
+    if (data.aria2_version) {
+      lines.push('version: ' + JSON.stringify(data.aria2_version));
+    }
+    if (wrap.version) {
+      lines.push('version (rpc): ' + String(wrap.version));
+    }
+    if (gs && typeof gs === 'object') {
+      Object.keys(gs).forEach(function (k) {
+        lines.push('stat ' + k + ': ' + JSON.stringify(gs[k]));
+      });
+    }
+    lines.push('— global options —');
+    if (go && typeof go === 'object') {
+      var keys = Object.keys(go).sort();
+      keys.slice(0, 32).forEach(function (k) {
+        lines.push(k + ': ' + String(go[k]));
+      });
+      if (keys.length > 32) lines.push('… +' + (keys.length - 32) + ' more');
+    }
+    return lines.join('\n');
+  }
+
+  async function pollAria2() {
+    if (!aria2Global) return;
+    try {
+      const res = await fetch('{{ url_for("api_aria2_global") }}');
+      if (!res.ok) {
+        aria2Global.textContent = 'Unavailable (' + res.status + ')';
+        return;
+      }
+      const data = await res.json();
+      aria2Global.textContent = fmtAria2Global(data);
+    } catch (_) {}
+  }
+
   pollDisk();
   setInterval(pollDisk, 8000);
   pollActivity();
   setInterval(pollActivity, 3000);
+  pollAria2();
+  setInterval(pollAria2, 10000);
 })();
 </script>
 {% endblock %}

@@ -5,12 +5,16 @@ file management, hardened authentication (Argon2, CSRF, secure cookies, rate lim
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import logging
 import os
 import secrets
 import shutil
 import threading
 import time
+import urllib.error
+import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,10 +34,13 @@ from flask import (
     url_for,
 )
 from flask_limiter import Limiter
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash
 
 from aria2_service import Aria2RPCError, fetch_all_downloads, get_service, global_stat
 from magnet_util import auto_subfolder_name, parse_magnet, pick_unique_dir
+from pathutil import safe_under_root
+from zip_jobs_store import ZipJobsStore
 
 try:
     from flask_wtf.csrf import CSRFProtect
@@ -67,15 +74,16 @@ ZIP_STORAGE_DIR = Path(
 
 ZIP_MAX_CONCURRENT = max(1, int(os.environ.get("ZIP_MAX_CONCURRENT", "2")))
 _zip_worker_sem = threading.BoundedSemaphore(ZIP_MAX_CONCURRENT)
-# Zip job state lives in memory (single-process). Use one gunicorn worker or shared storage if you scale out.
 
 _file_download_lock = threading.Lock()
 _active_http_downloads: dict[str, dict[str, Any]] = {}
 
-_zip_jobs_lock = threading.Lock()
-_zip_jobs: dict[str, dict[str, Any]] = {}
-_zip_active_by_path: dict[str, str] = {}
-_zip_done_by_path: dict[str, str] = {}
+_zip_store: ZipJobsStore | None = None
+
+_torrent_status_prev: dict[str, str] = {}
+_torrent_status_lock = threading.Lock()
+
+_LOG = logging.getLogger("torrent_server")
 
 
 def summarize_http_downloads(flat: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -133,6 +141,88 @@ def _human_bytes(n: int) -> str:
         if n >= div:
             return f"{n / div:.2f} {suf}"
     return f"{n} B"
+
+
+_allowed_cidr_cache: list[Any] | None = None
+
+
+def _allowed_cidr_networks() -> list[Any]:
+    global _allowed_cidr_cache
+    if _allowed_cidr_cache is not None:
+        return _allowed_cidr_cache
+    raw = os.environ.get("DASHBOARD_ALLOWED_CIDRS", "").strip()
+    if not raw:
+        _allowed_cidr_cache = []
+        return _allowed_cidr_cache
+    nets = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            continue
+    _allowed_cidr_cache = nets
+    return _allowed_cidr_cache
+
+
+def client_ip_allowed(ip: str) -> bool:
+    nets = _allowed_cidr_networks()
+    if not nets:
+        return True
+    try:
+        addr = ipaddress.ip_address(ip.split("%")[0])
+    except ValueError:
+        return False
+    return any(addr in n for n in nets)
+
+
+def _audit(kind: str, **extra: Any) -> None:
+    path = (os.environ.get("AUDIT_LOG_PATH") or "").strip()
+    if not path:
+        return
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(
+            {"ts": datetime.now(timezone.utc).isoformat(), "kind": kind, **extra},
+            default=str,
+        )
+        with p.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def _notify_webhook(event: str, payload: dict[str, Any]) -> None:
+    url = (os.environ.get("NOTIFY_WEBHOOK_URL") or "").strip()
+    if not url:
+        return
+    body = json.dumps({"event": event, **payload}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=12)
+    except urllib.error.URLError:
+        pass
+
+
+def _verify_files_download_token(rel_path: str, token: str) -> bool:
+    secret = (os.environ.get("FILES_DOWNLOAD_TOKEN_SECRET") or "").strip()
+    if not secret:
+        return False
+    ser = URLSafeTimedSerializer(secret, salt="weedr-files-v1")
+    try:
+        max_age = int(os.environ.get("FILES_DOWNLOAD_TOKEN_MAX_AGE", str(7 * 86400)))
+        data = ser.loads(token, max_age=max_age)
+        return str(data.get("path") or "") == rel_path
+    except (BadSignature, SignatureExpired):
+        return False
 
 
 def _http_download_validators(full: Path) -> tuple[str, datetime]:
@@ -221,17 +311,21 @@ def _collect_zip_entries(folder: Path) -> tuple[list[tuple[Path, str]], int]:
 
 
 def _run_zip_job_worker(job_id: str, rel_path: str, full: Path, download_name: str) -> None:
+    global _zip_store
+    store = _zip_store
+    if store is None:
+        return
     zip_path = _zip_blob_path(job_id)
     try:
-        if job_id not in _zip_jobs:
+        if store.get_job(job_id) is None:
             return
         entries, total_raw = _collect_zip_entries(full)
-        with _zip_jobs_lock:
-            j = _zip_jobs.get(job_id)
-            if j:
-                j["total_bytes"] = total_raw
-                j["processed_bytes"] = 0
-                j["progress"] = 0.0
+        store.update_totals(job_id, total_raw, 0, 0.0)
+
+        if store.cancel_requested(job_id):
+            zip_path.unlink(missing_ok=True)
+            store.mark_cancelled(job_id)
+            return
 
         if not entries:
             with zipfile.ZipFile(
@@ -253,7 +347,11 @@ def _run_zip_job_worker(job_id: str, rel_path: str, full: Path, download_name: s
                 compresslevel=6,
             ) as zf:
                 for abs_path, arcname in entries:
-                    if job_id not in _zip_jobs:
+                    if store.cancel_requested(job_id):
+                        zip_path.unlink(missing_ok=True)
+                        store.mark_cancelled(job_id)
+                        return
+                    if store.get_job(job_id) is None:
                         zip_path.unlink(missing_ok=True)
                         return
                     zf.write(abs_path, arcname=arcname)
@@ -262,50 +360,87 @@ def _run_zip_job_worker(job_id: str, rel_path: str, full: Path, download_name: s
                     except OSError:
                         pass
                     pct = (processed / total_raw * 100.0) if total_raw > 0 else 100.0
-                    with _zip_jobs_lock:
-                        jj = _zip_jobs.get(job_id)
-                        if jj:
-                            jj["processed_bytes"] = processed
-                            jj["progress"] = min(99.99, pct)
+                    store.update_progress(job_id, processed, min(99.99, pct))
 
+        if store.cancel_requested(job_id):
+            zip_path.unlink(missing_ok=True)
+            store.mark_cancelled(job_id)
+            return
+
+        finished = datetime.now(timezone.utc).isoformat()
         meta = {
             "download_name": download_name,
             "rel_path": rel_path,
-            "finished": datetime.now(timezone.utc).isoformat(),
+            "finished": finished,
         }
         _zip_meta_path(job_id).write_text(json.dumps(meta), encoding="utf-8")
 
-        with _zip_jobs_lock:
-            jj = _zip_jobs.get(job_id)
-            if jj:
-                jj["status"] = "done"
-                jj["progress"] = 100.0
-                jj["processed_bytes"] = total_raw if entries else 0
-                jj["total_bytes"] = total_raw
-            _zip_done_by_path[rel_path] = job_id
-            _zip_active_by_path.pop(rel_path, None)
+        pb = total_raw if entries else 0
+        store.mark_done(job_id, total_raw, pb, finished)
+        _notify_webhook(
+            "zip_done", {"job_id": job_id, "rel_path": rel_path, "download_name": download_name}
+        )
     except Exception as e:
         _delete_zip_artifacts(job_id)
-        with _zip_jobs_lock:
-            jj = _zip_jobs.get(job_id)
-            if jj:
-                jj["status"] = "error"
-                jj["error"] = str(e)
-                jj["progress"] = 0.0
-            _zip_active_by_path.pop(rel_path, None)
+        store.mark_error(job_id, str(e))
+        _notify_webhook("zip_error", {"job_id": job_id, "rel_path": rel_path, "error": str(e)})
 
 
 def _zip_thread_entry(job_id: str, rel_path: str, full: Path, download_name: str) -> None:
+    global _zip_store
+    store = _zip_store
+    if store is None:
+        return
     with _zip_worker_sem:
-        with _zip_jobs_lock:
-            if job_id not in _zip_jobs:
-                return
-            j = _zip_jobs.get(job_id)
-            if j:
-                j["status"] = "running"
-        if job_id not in _zip_jobs:
+        if store.get_job(job_id) is None:
+            return
+        store.set_running(job_id)
+        if store.get_job(job_id) is None:
             return
         _run_zip_job_worker(job_id, rel_path, full, download_name)
+
+
+def _apply_zip_retention() -> None:
+    global _zip_store
+    store = _zip_store
+    if store is None:
+        return
+    max_days = float(os.environ.get("ZIP_MAX_AGE_DAYS", "0") or "0")
+    max_total = int(os.environ.get("ZIP_MAX_TOTAL_BYTES", "0") or "0")
+    now_ts = time.time()
+    if max_days > 0:
+        for row in store.list_all_jobs():
+            if row.get("status") != "done":
+                continue
+            jid = row["job_id"]
+            zp = _zip_blob_path(jid)
+            if not zp.is_file():
+                continue
+            try:
+                if (now_ts - zp.stat().st_mtime) / 86400.0 > max_days:
+                    store.delete_job_row(jid)
+                    _delete_zip_artifacts(jid)
+            except OSError:
+                continue
+    if max_total > 0:
+        done_rows = [r for r in store.list_all_jobs() if r.get("status") == "done"]
+        items: list[tuple[float, str, int]] = []
+        for r in done_rows:
+            jid = r["job_id"]
+            zp = _zip_blob_path(jid)
+            if zp.is_file():
+                try:
+                    st = zp.stat()
+                    items.append((st.st_mtime, jid, st.st_size))
+                except OSError:
+                    continue
+        items.sort(key=lambda x: x[0])
+        total_sz = sum(x[2] for x in items)
+        while total_sz > max_total and items:
+            _, jid, sz = items.pop(0)
+            total_sz -= sz
+            store.delete_job_row(jid)
+            _delete_zip_artifacts(jid)
 
 
 def _remove_aria2_download_best_effort(svc: Any, gid: str) -> None:
@@ -316,6 +451,37 @@ def _remove_aria2_download_best_effort(svc: Any, gid: str) -> None:
             svc.call("aria2.removeDownloadResult", [gid])
         except Aria2RPCError:
             pass
+
+
+def _torrent_fire_notifications(data: dict[str, list[dict[str, Any]]]) -> None:
+    """Detect transitions into terminal aria2 states and emit webhooks / audit."""
+    global _torrent_status_prev
+    terminal = frozenset({"complete", "error"})
+    flat: list[dict[str, Any]] = []
+    for key in ("active", "waiting", "stopped"):
+        flat.extend(data.get(key) or [])
+    new_prev: dict[str, str] = {}
+    for t in flat:
+        gid = str(t.get("gid") or "")
+        if not gid:
+            continue
+        st = str(t.get("status") or "")
+        old = _torrent_status_prev.get(gid)
+        if old is not None and old not in terminal and st in terminal:
+            if st == "complete":
+                _notify_webhook("torrent_complete", {"gid": gid, "name": t.get("name")})
+                _audit("torrent_complete", gid=gid, name=t.get("name"))
+            elif st == "error":
+                err = t.get("error_message") or t.get("error_code")
+                _notify_webhook(
+                    "torrent_error",
+                    {"gid": gid, "name": t.get("name"), "error": err},
+                )
+                _audit("torrent_error", gid=gid, error=err)
+        new_prev[gid] = st
+    with _torrent_status_lock:
+        _torrent_status_prev.clear()
+        _torrent_status_prev.update(new_prev)
 
 
 def wait_for_torrent_total_length(svc: Any, gid: str, timeout: float = 120.0) -> int:
@@ -384,6 +550,21 @@ def create_app() -> Flask:
         headers_enabled=True,
     )
 
+    if not logging.root.handlers:
+        _lvl_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+        _lvl = getattr(logging, _lvl_name, logging.INFO)
+        logging.basicConfig(
+            level=_lvl,
+            format=os.environ.get("LOG_FORMAT", "%(asctime)s %(levelname)s %(message)s"),
+        )
+
+    global _zip_store
+    try:
+        ZIP_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as _zip_mk_err:
+        app.logger.warning("ZIP_STORAGE_DIR mkdir: %s", _zip_mk_err)
+    _zip_store = ZipJobsStore(Path(os.environ.get("ZIP_JOB_DB", str(ZIP_STORAGE_DIR / "jobs.sqlite"))))
+
     def verify_password(pw: str) -> bool:
         if not _ph_argon:
             app.logger.error("Set DASHBOARD_PASSWORD or DASHBOARD_PASSWORD_HASH")
@@ -401,15 +582,6 @@ def create_app() -> Flask:
     def require_auth() -> bool:
         return session.get("auth") is True
 
-    def safe_under_root(root: Path, candidate: Path) -> Path | None:
-        try:
-            resolved = candidate.resolve()
-            root_resolved = root.resolve()
-            resolved.relative_to(root_resolved)
-            return resolved
-        except (OSError, ValueError):
-            return None
-
     def ensure_aria2():
         svc = get_service(DOWNLOAD_DIR)
         svc.ensure_daemon()
@@ -423,6 +595,38 @@ def create_app() -> Flask:
         resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         return resp
 
+    _log_http_json = os.environ.get("LOG_JSON", "").lower() in ("1", "true", "yes")
+
+    @app.after_request
+    def _access_log(resp):
+        if request.endpoint == "static":
+            return resp
+        ip = get_client_ip()
+        if _log_http_json:
+            _LOG.info(
+                json.dumps(
+                    {
+                        "event": "http_request",
+                        "path": request.path,
+                        "endpoint": request.endpoint,
+                        "method": request.method,
+                        "ip": ip,
+                        "status": resp.status_code,
+                    },
+                    default=str,
+                )
+            )
+        else:
+            _LOG.info(
+                "request path=%s endpoint=%s method=%s ip=%s status=%s",
+                request.path,
+                request.endpoint,
+                request.method,
+                ip,
+                resp.status_code,
+            )
+        return resp
+
     @app.before_request
     def _require_config() -> None:
         if request.endpoint in ("static", "health", "login") or request.endpoint is None:
@@ -434,9 +638,50 @@ def create_app() -> Flask:
                     "Misconfigured: set DASHBOARD_PASSWORD or DASHBOARD_PASSWORD_HASH",
                 )
 
+    @app.before_request
+    def _dashboard_ip_allowlist() -> None:
+        if request.endpoint in ("static", "health", "login") or request.endpoint is None:
+            return
+        if (
+            request.endpoint == "download_file"
+            and request.args.get("token")
+            and (os.environ.get("FILES_DOWNLOAD_TOKEN_SECRET") or "").strip()
+        ):
+            return
+        if not client_ip_allowed(get_client_ip()):
+            abort(403)
+
     @app.route("/health")
     def health():
-        return {"ok": True}
+        deep = request.args.get("deep") in ("1", "true", "yes") or os.environ.get(
+            "HEALTH_DEEP", ""
+        ).lower() in ("1", "true", "yes")
+        if not deep:
+            return {"ok": True}
+        checks: dict[str, str] = {}
+        ok = True
+        try:
+            DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            probe = DOWNLOAD_DIR / ".health_probe"
+            probe.write_bytes(b"ok")
+            probe.unlink(missing_ok=True)
+            checks["download_dir"] = "ok"
+        except OSError as e:
+            checks["download_dir"] = str(e)
+            ok = False
+        try:
+            ZIP_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+            checks["zip_storage_dir"] = "ok"
+        except OSError as e:
+            checks["zip_storage_dir"] = str(e)
+            ok = False
+        try:
+            ensure_aria2().call("aria2.getVersion", [])
+            checks["aria2"] = "ok"
+        except Exception as e:
+            checks["aria2"] = str(e)
+            ok = False
+        return {"ok": ok, "checks": checks}
 
     @app.route("/login", methods=["GET", "POST"])
     @limiter.limit("12 per minute", methods=["POST"], error_message="Too many login attempts.")
@@ -451,7 +696,9 @@ def create_app() -> Flask:
                 session["auth"] = True
                 session.permanent = True
                 session["_fresh"] = secrets.token_hex(16)
+                _audit("login_ok", ip=get_client_ip())
                 return redirect(url_for("overview"))
+            _audit("login_fail", ip=get_client_ip())
             error = "Invalid credentials."
         return render_template("login.html", error=error)
 
@@ -559,6 +806,97 @@ def create_app() -> Flask:
         if not require_auth():
             abort(401)
 
+    def magnet_add_handler(magnet: str, parent_rel: str = "") -> tuple[dict[str, Any], int]:
+        """Parse and queue a magnet in DOWNLOAD_DIR (optional parent subfolder). Used by UI and RSS."""
+        if not magnet.lower().startswith("magnet:"):
+            return {"error": "Invalid magnet URI"}, 400
+        try:
+            parsed = parse_magnet(magnet)
+        except ValueError as e:
+            return {"error": str(e)}, 400
+        if not parsed.get("btih"):
+            return {"error": "Could not parse info-hash (xt=urn:btih:…) from magnet"}, 400
+
+        parent_rel = str(parent_rel).strip().strip("/")
+
+        base = DOWNLOAD_DIR
+        if parent_rel:
+            if ".." in parent_rel.split("/"):
+                return {"error": "Invalid parent path"}, 400
+            p = (DOWNLOAD_DIR / parent_rel).resolve()
+            parent_safe = safe_under_root(DOWNLOAD_DIR, p)
+            if parent_safe is None:
+                return {"error": "Invalid parent path"}, 400
+            base = parent_safe
+            base.mkdir(parents=True, exist_ok=True)
+
+        folder_label = auto_subfolder_name(parsed.get("dn"), str(parsed["btih"]))
+        final_dir = pick_unique_dir(base, folder_label)
+
+        du = shutil.disk_usage(DOWNLOAD_DIR)
+        reserve = _disk_reserve(du)
+        free_effective = max(0, du.free - reserve)
+
+        options: dict[str, Any] = {
+            "dir": str(final_dir),
+            "seed-time": os.environ.get("ARIA2_SEED_TIME", "0"),
+            "seed-ratio": os.environ.get("ARIA2_SEED_RATIO", "0"),
+        }
+
+        xl_bytes = parsed.get("xl")
+        need_metadata = not (isinstance(xl_bytes, int) and xl_bytes > 0)
+
+        if isinstance(xl_bytes, int) and xl_bytes > 0:
+            if xl_bytes > free_effective:
+                return (
+                    {
+                        "error": (
+                            f"Not enough free space (after reserve). Need {_human_bytes(xl_bytes)}, "
+                            f"effective free {_human_bytes(free_effective)}."
+                        ),
+                        "need_bytes": xl_bytes,
+                        "free_effective_bytes": free_effective,
+                    },
+                    400,
+                )
+        else:
+            options["pause"] = "true"
+
+        try:
+            svc = ensure_aria2()
+            gid = svc.call("aria2.addUri", [[magnet], options])
+        except Aria2RPCError as e:
+            return {"error": str(e)}, 503
+
+        if need_metadata:
+            try:
+                total_len = wait_for_torrent_total_length(svc, gid)
+            except Aria2RPCError as e:
+                return {"error": str(e)}, 400
+            du2 = shutil.disk_usage(DOWNLOAD_DIR)
+            reserve2 = _disk_reserve(du2)
+            free2 = max(0, du2.free - reserve2)
+            if total_len > free2:
+                _remove_aria2_download_best_effort(svc, gid)
+                return (
+                    {
+                        "error": (
+                            f"Not enough free space for this torrent (~{_human_bytes(total_len)}). "
+                            f"Effective free {_human_bytes(free2)}."
+                        ),
+                        "need_bytes": total_len,
+                        "free_effective_bytes": free2,
+                    },
+                    400,
+                )
+            try:
+                svc.call("aria2.unpause", [gid])
+            except Aria2RPCError as e:
+                return {"error": str(e)}, 503
+
+        rel_dir = str(final_dir.relative_to(DOWNLOAD_DIR)).replace("\\", "/")
+        return {"ok": True, "gid": gid, "save_folder": rel_dir}, 200
+
     @app.route("/api/torrents", methods=["GET"])
     @limiter.limit("120 per minute")
     def api_torrents_list():
@@ -569,6 +907,7 @@ def create_app() -> Flask:
             gs = global_stat(svc)
         except Aria2RPCError as e:
             return jsonify({"error": str(e)}), 503
+        _torrent_fire_notifications(data)
         return jsonify({"downloads": data, "meta": gs})
 
     @app.route("/api/fs/stats", methods=["GET"])
@@ -625,15 +964,6 @@ def create_app() -> Flask:
         _auth_json()
         body = request.get_json(silent=True) or {}
         magnet = (request.form.get("magnet") or body.get("magnet") or "").strip()
-        if not magnet.lower().startswith("magnet:"):
-            return jsonify({"error": "Invalid magnet URI"}), 400
-        try:
-            parsed = parse_magnet(magnet)
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-        if not parsed.get("btih"):
-            return jsonify({"error": "Could not parse info-hash (xt=urn:btih:…) from magnet"}), 400
-
         parent_rel = (
             body.get("parent")
             or body.get("subdir")
@@ -642,82 +972,8 @@ def create_app() -> Flask:
             or ""
         )
         parent_rel = str(parent_rel).strip().strip("/")
-
-        base = DOWNLOAD_DIR
-        if parent_rel:
-            if ".." in parent_rel.split("/"):
-                return jsonify({"error": "Invalid parent path"}), 400
-            p = (DOWNLOAD_DIR / parent_rel).resolve()
-            parent_safe = safe_under_root(DOWNLOAD_DIR, p)
-            if parent_safe is None:
-                return jsonify({"error": "Invalid parent path"}), 400
-            base = parent_safe
-            base.mkdir(parents=True, exist_ok=True)
-
-        folder_label = auto_subfolder_name(parsed.get("dn"), str(parsed["btih"]))
-        final_dir = pick_unique_dir(base, folder_label)
-
-        du = shutil.disk_usage(DOWNLOAD_DIR)
-        reserve = _disk_reserve(du)
-        free_effective = max(0, du.free - reserve)
-
-        options: dict[str, Any] = {
-            "dir": str(final_dir),
-            "seed-time": os.environ.get("ARIA2_SEED_TIME", "0"),
-            "seed-ratio": os.environ.get("ARIA2_SEED_RATIO", "0"),
-        }
-
-        xl_bytes = parsed.get("xl")
-        need_metadata = not (isinstance(xl_bytes, int) and xl_bytes > 0)
-
-        if isinstance(xl_bytes, int) and xl_bytes > 0:
-            if xl_bytes > free_effective:
-                return jsonify(
-                    {
-                        "error": (
-                            f"Not enough free space (after reserve). Need {_human_bytes(xl_bytes)}, "
-                            f"effective free {_human_bytes(free_effective)}."
-                        ),
-                        "need_bytes": xl_bytes,
-                        "free_effective_bytes": free_effective,
-                    }
-                ), 400
-        else:
-            options["pause"] = "true"
-
-        try:
-            svc = ensure_aria2()
-            gid = svc.call("aria2.addUri", [[magnet], options])
-        except Aria2RPCError as e:
-            return jsonify({"error": str(e)}), 503
-
-        if need_metadata:
-            try:
-                total_len = wait_for_torrent_total_length(svc, gid)
-            except Aria2RPCError as e:
-                return jsonify({"error": str(e)}), 400
-            du2 = shutil.disk_usage(DOWNLOAD_DIR)
-            reserve2 = _disk_reserve(du2)
-            free2 = max(0, du2.free - reserve2)
-            if total_len > free2:
-                _remove_aria2_download_best_effort(svc, gid)
-                return jsonify(
-                    {
-                        "error": (
-                            f"Not enough free space for this torrent (~{_human_bytes(total_len)}). "
-                            f"Effective free {_human_bytes(free2)}."
-                        ),
-                        "need_bytes": total_len,
-                        "free_effective_bytes": free2,
-                    }
-                ), 400
-            try:
-                svc.call("aria2.unpause", [gid])
-            except Aria2RPCError as e:
-                return jsonify({"error": str(e)}), 503
-
-        rel_dir = str(final_dir.relative_to(DOWNLOAD_DIR)).replace("\\", "/")
-        return jsonify({"ok": True, "gid": gid, "save_folder": rel_dir})
+        payload, code = magnet_add_handler(magnet, parent_rel)
+        return jsonify(payload), code
 
     @app.route("/api/torrents/<gid>/pause", methods=["POST"])
     def api_torrent_pause(gid: str):
@@ -814,6 +1070,8 @@ def create_app() -> Flask:
                         p.unlink()
                 except OSError as e:
                     app.logger.warning("Could not delete %s: %s", p, e)
+        _audit("torrent_remove", gid=gid, delete_files=delete_files)
+        _notify_webhook("torrent_remove", {"gid": gid, "delete_files": delete_files})
         return jsonify({"ok": True})
 
     @app.route("/api/torrents/purge-stopped", methods=["POST"])
@@ -843,7 +1101,41 @@ def create_app() -> Flask:
                 full.unlink()
         except OSError as e:
             return jsonify({"error": str(e)}), 400
+        _audit("fs_delete", path=rel)
         return jsonify({"ok": True})
+
+    @app.route("/api/fs/download-token", methods=["POST"])
+    @limiter.limit("30 per minute")
+    def api_fs_download_token():
+        """Mint a time-limited signed URL token for GET /files/… (read-only file access)."""
+        _auth_json()
+        body = request.get_json(silent=True) or {}
+        rel = (body.get("path") or "").strip().strip("/")
+        if not rel or ".." in rel.split("/"):
+            return jsonify({"error": "Invalid path"}), 400
+        secret = (os.environ.get("FILES_DOWNLOAD_TOKEN_SECRET") or "").strip()
+        if not secret:
+            return jsonify({"error": "Set FILES_DOWNLOAD_TOKEN_SECRET to enable signed URLs."}), 501
+        full = safe_under_root(DOWNLOAD_DIR, (DOWNLOAD_DIR / rel).resolve())
+        if full is None or not full.is_file():
+            return jsonify({"error": "Not found"}), 404
+        ser = URLSafeTimedSerializer(secret, salt="weedr-files-v1")
+        token = ser.dumps({"path": rel})
+        dl_url = url_for("download_file", rel_path=rel, token=token)
+        return jsonify({"token": token, "download_url": dl_url})
+
+    @app.route("/api/aria2/global", methods=["GET"])
+    @limiter.limit("60 per minute")
+    def api_aria2_global():
+        _auth_json()
+        try:
+            svc = ensure_aria2()
+            gs = global_stat(svc)
+            ver = svc.call("aria2.getVersion", [])
+            opts = svc.call("aria2.getGlobalOption", [])
+        except Aria2RPCError as e:
+            return jsonify({"error": str(e)}), 503
+        return jsonify({"global_stat": gs, "aria2_version": ver, "global_option": opts})
 
     @app.route("/api/fs/zip/start", methods=["POST"])
     @limiter.limit("12 per minute")
@@ -882,38 +1174,34 @@ def create_app() -> Flask:
         download_name = safe_dn + ".zip"
         now = datetime.now(timezone.utc).isoformat()
 
-        with _zip_jobs_lock:
-            active = _zip_active_by_path.get(rel)
-            if active:
-                aj = _zip_jobs.get(active)
-                if aj and aj.get("status") in ("queued", "running"):
-                    return jsonify(
-                        {
-                            "job_id": active,
-                            "status": aj.get("status"),
-                            "dedup": True,
-                            "message": "A zip for this folder is already in progress.",
-                        }
-                    )
+        zs = _zip_store
+        assert zs is not None
 
-            prev_done = _zip_done_by_path.pop(rel, None)
-            if prev_done:
-                _delete_zip_artifacts(prev_done)
-                _zip_jobs.pop(prev_done, None)
+        aj0 = zs.active_job_for_path(rel)
+        if aj0 and aj0.get("status") in ("queued", "running"):
+            return jsonify(
+                {
+                    "job_id": aj0["job_id"],
+                    "status": aj0.get("status"),
+                    "dedup": True,
+                    "message": "A zip for this folder is already in progress.",
+                }
+            )
 
-            job_id = secrets.token_hex(12)
-            _zip_jobs[job_id] = {
-                "status": "queued",
-                "progress": 0.0,
-                "processed_bytes": 0,
-                "total_bytes": 0,
-                "rel_path": rel,
-                "folder_name": full.name or "folder",
-                "download_name": download_name,
-                "error": None,
-                "started": now,
-            }
-            _zip_active_by_path[rel] = job_id
+        prev_done = zs.latest_done_for_path(rel)
+        if prev_done:
+            zs.delete_job_row(prev_done["job_id"])
+            _delete_zip_artifacts(prev_done["job_id"])
+
+        job_id = secrets.token_hex(12)
+        zs.insert_job(
+            job_id,
+            rel,
+            full.name or "folder",
+            download_name,
+            now,
+            status="queued",
+        )
 
         threading.Thread(
             target=_zip_thread_entry,
@@ -921,6 +1209,8 @@ def create_app() -> Flask:
             daemon=True,
         ).start()
 
+        _notify_webhook("zip_started", {"job_id": job_id, "rel_path": rel})
+        _audit("zip_started", job_id=job_id, rel_path=rel)
         return jsonify({"job_id": job_id, "status": "queued"})
 
     @app.route("/api/fs/zip/status/<job_id>", methods=["GET"])
@@ -931,8 +1221,9 @@ def create_app() -> Flask:
         job_id = job_id.strip()
         if not job_id or len(job_id) > 48:
             abort(400)
-        with _zip_jobs_lock:
-            j = _zip_jobs.get(job_id)
+        zs = _zip_store
+        assert zs is not None
+        j = zs.get_job(job_id)
         if j:
             out = dict(j)
             out["job_id"] = job_id
@@ -970,32 +1261,30 @@ def create_app() -> Flask:
         if not rel:
             return jsonify({"status": "none"})
 
-        with _zip_jobs_lock:
-            active_id = _zip_active_by_path.get(rel)
-            if active_id:
-                aj = _zip_jobs.get(active_id)
-                if aj and aj.get("status") in ("queued", "running"):
-                    out = dict(aj)
-                    out["job_id"] = active_id
-                    out["processed_human"] = _human_bytes(int(out.get("processed_bytes") or 0))
-                    out["total_human"] = _human_bytes(int(out.get("total_bytes") or 0))
-                    return jsonify(out)
+        zs = _zip_store
+        assert zs is not None
+        aj = zs.active_job_for_path(rel)
+        if aj and aj.get("status") in ("queued", "running"):
+            out = dict(aj)
+            out["job_id"] = aj["job_id"]
+            out["processed_human"] = _human_bytes(int(out.get("processed_bytes") or 0))
+            out["total_human"] = _human_bytes(int(out.get("total_bytes") or 0))
+            return jsonify(out)
 
-            done_id = _zip_done_by_path.get(rel)
-            if done_id and _zip_blob_path(done_id).is_file():
-                meta = _read_zip_meta(done_id)
-                return jsonify(
-                    {
-                        "status": "done",
-                        "job_id": done_id,
-                        "progress": 100.0,
-                        "download_url": url_for("api_fs_zip_download", job_id=done_id),
-                        "download_name": meta.get("download_name") or "download.zip",
-                        "rel_path": rel,
-                    }
-                )
-            if done_id:
-                _zip_done_by_path.pop(rel, None)
+        dj = zs.latest_done_for_path(rel)
+        if dj and _zip_blob_path(dj["job_id"]).is_file():
+            jid = dj["job_id"]
+            meta = _read_zip_meta(jid)
+            return jsonify(
+                {
+                    "status": "done",
+                    "job_id": jid,
+                    "progress": 100.0,
+                    "download_url": url_for("api_fs_zip_download", job_id=jid),
+                    "download_name": meta.get("download_name") or "download.zip",
+                    "rel_path": rel,
+                }
+            )
 
         return jsonify({"status": "none"})
 
@@ -1006,10 +1295,15 @@ def create_app() -> Flask:
         _auth_json()
         rows: list[dict[str, Any]] = []
 
-        with _zip_jobs_lock:
-            snap: dict[str, dict[str, Any]] = {k: dict(v) for k, v in _zip_jobs.items()}
+        zs = _zip_store
+        assert zs is not None
+        _apply_zip_retention()
 
-        for jid, j in snap.items():
+        snap_rows = zs.list_all_jobs()
+        snap_ids = {r["job_id"] for r in snap_rows}
+
+        for j in snap_rows:
+            jid = j["job_id"]
             zp = _zip_blob_path(jid)
             row: dict[str, Any] = {
                 "job_id": jid,
@@ -1024,6 +1318,7 @@ def create_app() -> Flask:
                 "total_human": _human_bytes(int(j.get("total_bytes") or 0)),
                 "error": j.get("error"),
                 "started": j.get("started"),
+                "cancel_requested": bool(int(j.get("cancel_requested") or 0)),
                 "orphan": False,
             }
             if j.get("status") == "done" and zp.is_file():
@@ -1048,7 +1343,7 @@ def create_app() -> Flask:
         if ZIP_STORAGE_DIR.is_dir():
             for zp in ZIP_STORAGE_DIR.glob("*.zip"):
                 jid = zp.stem
-                if jid in snap:
+                if jid in snap_ids:
                     continue
                 meta = _read_zip_meta(jid)
                 try:
@@ -1081,33 +1376,45 @@ def create_app() -> Flask:
         rows.sort(key=lambda r: float(r.get("sort_ts") or 0), reverse=True)
         for r in rows:
             r.pop("sort_ts", None)
-        return jsonify({"items": rows, "zip_storage_dir": str(ZIP_STORAGE_DIR)})
+        retention_note = ""
+        if float(os.environ.get("ZIP_MAX_AGE_DAYS", "0") or "0") > 0:
+            retention_note += f" Max age {os.environ.get('ZIP_MAX_AGE_DAYS')} days."
+        if int(os.environ.get("ZIP_MAX_TOTAL_BYTES", "0") or "0") > 0:
+            retention_note += " Total size cap active."
+        return jsonify(
+            {
+                "items": rows,
+                "zip_storage_dir": str(ZIP_STORAGE_DIR),
+                "retention_hint": retention_note.strip(),
+            }
+        )
 
     @app.route("/api/fs/zip/delete/<job_id>", methods=["DELETE"])
     @limiter.limit("60 per minute")
     def api_fs_zip_delete(job_id: str):
-        """Remove a finished zip from disk and indexes. Queued jobs are cancelled."""
+        """Remove zip artifacts; running jobs get a cancel request."""
         _auth_json()
         job_id = job_id.strip()
         if not job_id or len(job_id) > 48:
             return jsonify({"error": "Invalid job id"}), 400
 
-        with _zip_jobs_lock:
-            j = _zip_jobs.get(job_id)
-            if j and j.get("status") == "running":
-                return jsonify(
-                    {"error": "Cannot delete while zipping — wait until it finishes or fails."}
-                ), 409
+        zs = _zip_store
+        assert zs is not None
+        j = zs.get_job(job_id)
+        if j is None:
+            _delete_zip_artifacts(job_id)
+            _audit("zip_delete_orphan", job_id=job_id)
+            return jsonify({"ok": True})
 
-            _zip_jobs.pop(job_id, None)
-            for rp, jid in list(_zip_done_by_path.items()):
-                if jid == job_id:
-                    _zip_done_by_path.pop(rp, None)
-            for rp, jid in list(_zip_active_by_path.items()):
-                if jid == job_id:
-                    _zip_active_by_path.pop(rp, None)
+        if j.get("status") == "running":
+            zs.request_cancel(job_id)
+            _audit("zip_cancel_requested", job_id=job_id)
+            return jsonify({"ok": True, "status": "cancelling"})
 
+        zs.delete_job_row(job_id)
         _delete_zip_artifacts(job_id)
+        _audit("zip_deleted", job_id=job_id)
+        _notify_webhook("zip_deleted", {"job_id": job_id})
         return jsonify({"ok": True})
 
     @app.route("/api/fs/zip/download/<job_id>")
@@ -1136,7 +1443,13 @@ def create_app() -> Flask:
 
     @app.route("/files/<path:rel_path>")
     def download_file(rel_path: str):
-        if not require_auth():
+        norm_rel = rel_path.replace("\\", "/")
+        tok = request.args.get("token")
+        token_ok = bool(
+            tok
+            and _verify_files_download_token(norm_rel, tok)
+        )
+        if not token_ok and not require_auth():
             abort(401)
         if ".." in rel_path.split("/"):
             abort(400)
@@ -1181,6 +1494,64 @@ def create_app() -> Flask:
 
         resp.call_on_close(_release_http_download)
         return resp
+
+    def _rss_worker_loop() -> None:
+        import sqlite3
+
+        from rss_grabber import fetch_magnets_from_feed_url
+
+        feed = (os.environ.get("RSS_FEED_URL") or "").strip()
+        if not feed:
+            app.logger.warning("ENABLE_RSS_GRABS is set but RSS_FEED_URL is empty")
+            return
+        dbp = Path(os.environ.get("RSS_STATE_DB", str(DOWNLOAD_DIR / ".rss_magnets.sqlite")))
+        try:
+            dbp.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            app.logger.error("RSS state DB: %s", e)
+            return
+        interval = max(60, int(os.environ.get("RSS_POLL_SECONDS", "900")))
+        max_per = max(1, int(os.environ.get("RSS_MAX_MAGNETS_PER_POLL", "5")))
+        parent_rss = (os.environ.get("RSS_PARENT_SUBDIR") or "").strip().strip("/")
+        conn = sqlite3.connect(str(dbp))
+        conn.execute("CREATE TABLE IF NOT EXISTS seen (magnet TEXT PRIMARY KEY)")
+        conn.commit()
+        while True:
+            try:
+                magnets = fetch_magnets_from_feed_url(feed)
+                added = 0
+                for mag in magnets:
+                    if added >= max_per:
+                        break
+                    try:
+                        with conn:
+                            conn.execute("INSERT INTO seen (magnet) VALUES (?)", (mag,))
+                    except sqlite3.IntegrityError:
+                        continue
+                    payload, code = magnet_add_handler(mag, parent_rss)
+                    if code >= 400:
+                        try:
+                            with conn:
+                                conn.execute("DELETE FROM seen WHERE magnet = ?", (mag,))
+                        except sqlite3.Error:
+                            pass
+                        app.logger.warning("RSS magnet add failed %s: %s", code, payload)
+                    else:
+                        added += 1
+                        _audit("rss_magnet_added", gid=payload.get("gid"))
+                        _notify_webhook(
+                            "rss_torrent_added",
+                            {
+                                "gid": payload.get("gid"),
+                                "save_folder": payload.get("save_folder"),
+                            },
+                        )
+            except Exception:
+                app.logger.exception("RSS poll failed")
+            time.sleep(interval)
+
+    if os.environ.get("ENABLE_RSS_GRABS", "").lower() in ("1", "true", "yes"):
+        threading.Thread(target=_rss_worker_loop, daemon=True).start()
 
     return app
 

@@ -1,0 +1,22 @@
+services:
+  weedr:
+    build: .
+    ports:
+      - "${PORT:-5000}:5000"
+    env_file:
+      - .env
+    environment:
+      DOWNLOAD_DIR: /data/downloads
+      ZIP_STORAGE_DIR: /data/zips
+      ARIA2_STATE_DIR: /data/aria2-state
+      HOST: 0.0.0.0
+      PORT: "5000"
+    volumes:
+      - downloads:/data/downloads
+      - zips:/data/zips
+      - aria2_state:/data/aria2-state
+
+volumes:
+  downloads:
+  zips:
+  aria2_state:

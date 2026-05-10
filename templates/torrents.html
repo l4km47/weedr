@@ -7,8 +7,11 @@
   <form id="magnet-form" class="magnet-inline-form">
     <label class="sr-only" for="magnet">Magnet link</label>
     <input type="text" id="magnet" name="magnet" class="magnet-inline-field magnet-inline-magnet" placeholder="Tap — paste from clipboard &amp; add" autocomplete="off" spellcheck="false" required inputmode="url">
+    <input type="text" id="magnet-parent" name="parent" class="magnet-inline-field magnet-inline-parent" placeholder="Subfolder (optional)" autocomplete="off" spellcheck="false" title="Created under this folder inside your download directory">
     <button type="submit" class="btn primary btn-sm magnet-inline-submit">Add</button>
   </form>
+  <label class="sr-only" for="torrent-filter">Filter</label>
+  <input type="search" id="torrent-filter" class="magnet-inline-field magnet-inline-filter" placeholder="Filter by name…" autocomplete="off">
   <p id="magnet-msg" class="magnet-inline-msg small hidden"></p>
 </div>
 {% endblock %}
@@ -42,6 +45,8 @@
   const globalToolbar = document.getElementById('global-toolbar');
   const magnetForm = document.getElementById('magnet-form');
   const magnetMsg = document.getElementById('magnet-msg');
+  const filterInput = document.getElementById('torrent-filter');
+  let lastDownloads = null;
   const chartMap = {};
   const speedHistory = {};
   const MAX_POINTS = 120;
@@ -323,6 +328,57 @@
     pollTorrents();
   });
 
+  function nameFilterQuery() {
+    return (filterInput && filterInput.value ? filterInput.value : '').trim().toLowerCase();
+  }
+
+  function filterRows(rows) {
+    var q = nameFilterQuery();
+    if (!q) return rows || [];
+    return (rows || []).filter(function (t) {
+      return String(t.name || t.gid || '').toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  function renderTorrentTables() {
+    if (!lastDownloads) return;
+    const d = lastDownloads;
+    const meta = lastDownloads._meta || {};
+    const g = meta.global || {};
+    const dh = g.download_speed_human || fmtSpeed(g.downloadSpeed_bps != null ? g.downloadSpeed_bps : g.downloadSpeed);
+    const uh = g.upload_speed_human || fmtSpeed(g.uploadSpeed_bps != null ? g.uploadSpeed_bps : g.uploadSpeed);
+    const na = g.numActive != null ? g.numActive : '0';
+    globalToolbar.innerHTML =
+      '<span class="chip chip-down">↓ ' + esc(dh) + '</span>' +
+      '<span class="chip chip-up">↑ ' + esc(uh) + '</span>' +
+      '<span class="chip">Active ' + esc(String(na)) + '</span>';
+
+    const activeRaw = d.active || [];
+    appendHistory(activeRaw);
+    const active = filterRows(activeRaw);
+    destroyAllCharts();
+
+    torrentRoot.innerHTML =
+      renderActiveTable(active) +
+      renderPlainTable('Waiting', filterRows(d.waiting || []), 'Queue empty.', 9) +
+      renderPlainTable('Stopped / completed', filterRows((d.stopped || []).slice(0, 80)), 'No history.', 9) +
+      '<p class="small muted"><button type="button" class="btn btn-sm" id="purge-stopped">Clear stopped history</button></p>';
+
+    torrentRoot.querySelectorAll('canvas[data-chart-gid]').forEach(function (canvas) {
+      const gid = canvas.getAttribute('data-chart-gid');
+      if (gid) buildChart(canvas, gid);
+    });
+
+    const purgeBtn = document.getElementById('purge-stopped');
+    if (purgeBtn) {
+      purgeBtn.addEventListener('click', async function () {
+        if (!confirm('Purge stopped download results from aria2?')) return;
+        await fetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
+        pollTorrents();
+      });
+    }
+  }
+
   async function pollTorrents() {
     try {
       const res = await fetch('{{ url_for("api_torrents_list") }}');
@@ -334,38 +390,9 @@
       }
       const d = data.downloads || {};
       const meta = data.meta || {};
-      const g = meta.global || {};
-      const dh = g.download_speed_human || fmtSpeed(g.downloadSpeed_bps != null ? g.downloadSpeed_bps : g.downloadSpeed);
-      const uh = g.upload_speed_human || fmtSpeed(g.uploadSpeed_bps != null ? g.uploadSpeed_bps : g.uploadSpeed);
-      const na = g.numActive != null ? g.numActive : '0';
-      globalToolbar.innerHTML =
-        '<span class="chip chip-down">↓ ' + esc(dh) + '</span>' +
-        '<span class="chip chip-up">↑ ' + esc(uh) + '</span>' +
-        '<span class="chip">Active ' + esc(String(na)) + '</span>';
-
-      const active = d.active || [];
-      appendHistory(active);
-      destroyAllCharts();
-
-      torrentRoot.innerHTML =
-        renderActiveTable(active) +
-        renderPlainTable('Waiting', d.waiting || [], 'Queue empty.', 9) +
-        renderPlainTable('Stopped / completed', (d.stopped || []).slice(0, 80), 'No history.', 9) +
-        '<p class="small muted"><button type="button" class="btn btn-sm" id="purge-stopped">Clear stopped history</button></p>';
-
-      torrentRoot.querySelectorAll('canvas[data-chart-gid]').forEach(function (canvas) {
-        const gid = canvas.getAttribute('data-chart-gid');
-        if (gid) buildChart(canvas, gid);
-      });
-
-      const purgeBtn = document.getElementById('purge-stopped');
-      if (purgeBtn) {
-        purgeBtn.addEventListener('click', async function () {
-          if (!confirm('Purge stopped download results from aria2?')) return;
-          await fetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
-          pollTorrents();
-        });
-      }
+      d._meta = meta;
+      lastDownloads = d;
+      renderTorrentTables();
     } catch (_) {}
   }
 
@@ -374,6 +401,8 @@
     form.reset();
     var m = form.elements.namedItem('magnet');
     if (m && 'value' in m) m.value = '';
+    var p = form.elements.namedItem('parent');
+    if (p && 'value' in p) p.value = '';
   }
 
   if (magnetForm) {
@@ -401,10 +430,12 @@
       magnetMsg.classList.add('hidden');
       var magnetEl = magnetForm.elements.namedItem('magnet');
       var magnet = magnetEl && magnetEl.value ? magnetEl.value.trim() : '';
+      var parentEl = magnetForm.elements.namedItem('parent');
+      var parentVal = parentEl && parentEl.value ? String(parentEl.value).trim() : '';
       const res = await fetch('{{ url_for("api_torrents_add") }}', {
         method: 'POST',
         headers: headersJson(),
-        body: JSON.stringify({ magnet, parent: '' }),
+        body: JSON.stringify({ magnet: magnet, parent: parentVal }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -419,6 +450,12 @@
       magnetMsg.classList.add('ok');
       clearMagnetForm(magnetForm);
       pollTorrents();
+    });
+  }
+
+  if (filterInput) {
+    filterInput.addEventListener('input', function () {
+      if (lastDownloads) renderTorrentTables();
     });
   }
 
