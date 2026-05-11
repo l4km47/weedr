@@ -1,17 +1,17 @@
 {% extends "layout_app.html" %}
 {% block title %}Transfers · weedr{% endblock %}
 {% block page_heading %}Transfers{% endblock %}
-{% block page_sub %}<p class="page-sub">Live queue, bandwidth, and per-torrent charts — sampled every ~1.5s.</p>{% endblock %}
+{% block page_sub %}<p class="page-sub">Pick a torrent on the left — details, files, and speed chart update live.</p>{% endblock %}
 {% block header_tools %}
 <div class="header-add-toolbar">
   <form id="magnet-form" class="magnet-inline-form">
     <label class="sr-only" for="magnet">Magnet link</label>
-    <input type="text" id="magnet" name="magnet" class="magnet-inline-field magnet-inline-magnet" placeholder="Tap — paste from clipboard &amp; add" autocomplete="off" spellcheck="false" required inputmode="url">
+    <input type="text" id="magnet" name="magnet" class="magnet-inline-field magnet-inline-magnet" placeholder="Magnet URI — tap to paste" autocomplete="off" spellcheck="false" required inputmode="url">
     <input type="text" id="magnet-parent" name="parent" class="magnet-inline-field magnet-inline-parent" placeholder="Subfolder (optional)" autocomplete="off" spellcheck="false" title="Created under this folder inside your download directory">
     <button type="submit" class="btn primary btn-sm magnet-inline-submit">Add</button>
   </form>
   <label class="sr-only" for="torrent-filter">Filter</label>
-  <input type="search" id="torrent-filter" class="magnet-inline-field magnet-inline-filter" placeholder="Filter by name…" autocomplete="off">
+  <input type="search" id="torrent-filter" class="magnet-inline-field magnet-inline-filter" placeholder="Filter list…" autocomplete="off">
   <p id="magnet-msg" class="magnet-inline-msg small hidden"></p>
 </div>
 {% endblock %}
@@ -19,17 +19,60 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
 {% endblock %}
 {% block app_content %}
-<main class="stack-main">
-  <section class="card-pro">
+<main class="stack-main transfers-page">
+  <section class="card-pro transfers-card">
     <div class="card-head card-head-row">
       <h2 class="card-title">Transfers</h2>
       <div id="global-toolbar" class="stat-chips" aria-live="polite">
-        <span id="global-stat" class="chip chip-loading">…</span>
+        <span class="chip chip-loading">…</span>
       </div>
     </div>
-    <div class="card-body">
-      <p class="muted small card-desc">Charts appear only for <strong>active</strong> downloads. Stopped items stay listed for history until purged in aria2.</p>
-      <div id="torrent-sections"></div>
+    <div class="card-body transfers-card-body">
+      <div id="transfers-shell" class="transfers-shell">
+        <div class="transfers-pane transfers-pane-list">
+          <div id="torrent-list-mount" class="torrent-list-mount" aria-label="Torrent list"></div>
+          <div class="torrent-list-footer">
+            <button type="button" class="btn btn-sm ghost" id="purge-stopped">Clear stopped history</button>
+          </div>
+        </div>
+        <div class="transfers-pane transfers-pane-detail" id="torrent-detail-pane">
+          <div id="detail-empty" class="detail-empty">
+            <p class="detail-empty-title">Select a torrent</p>
+            <p class="muted small">Bandwidth, per-file progress, and limits appear here.</p>
+          </div>
+          <div id="detail-body" class="detail-body hidden">
+            <div class="detail-head">
+              <h3 id="detail-title" class="detail-title">—</h3>
+              <span id="detail-status" class="pill detail-status-pill">—</span>
+            </div>
+            <div id="detail-chips" class="detail-chips"></div>
+            <div class="detail-chart-card">
+              <div class="detail-chart-head muted small">Speed (sampled while active)</div>
+              <div class="detail-chart-wrap">
+                <canvas id="detail-chart-canvas" height="120" aria-label="Speed chart"></canvas>
+              </div>
+            </div>
+            <div id="detail-err" class="small error hidden" role="alert"></div>
+            <details class="detail-opts details-pro">
+              <summary>Limits / seeding</summary>
+              <div class="opts-grid" id="detail-opts-grid"></div>
+              <button type="button" class="btn btn-sm primary" id="detail-save-opts">Apply options</button>
+            </details>
+            <div class="detail-actions" id="detail-actions"></div>
+            <div class="detail-files-head">
+              <h4 class="detail-files-title">Files</h4>
+              <span id="detail-files-count" class="muted small"></span>
+            </div>
+            <div class="detail-files-scroll">
+              <table class="detail-files-table" id="detail-files-table">
+                <thead><tr><th>#</th><th>File</th><th>Progress</th><th>Size</th></tr></thead>
+                <tbody id="detail-files-tbody"></tbody>
+              </table>
+              <p id="detail-files-empty" class="muted small hidden">No file entries (HTTP download or single file).</p>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 </main>
@@ -41,13 +84,29 @@
     return { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken };
   }
 
-  const torrentRoot = document.getElementById('torrent-sections');
+  const listMount = document.getElementById('torrent-list-mount');
   const globalToolbar = document.getElementById('global-toolbar');
   const magnetForm = document.getElementById('magnet-form');
   const magnetMsg = document.getElementById('magnet-msg');
   const filterInput = document.getElementById('torrent-filter');
+  const detailEmpty = document.getElementById('detail-empty');
+  const detailBody = document.getElementById('detail-body');
+  const detailTitle = document.getElementById('detail-title');
+  const detailStatus = document.getElementById('detail-status');
+  const detailChips = document.getElementById('detail-chips');
+  const detailErr = document.getElementById('detail-err');
+  const detailOptsGrid = document.getElementById('detail-opts-grid');
+  const detailActions = document.getElementById('detail-actions');
+  const detailFilesTbody = document.getElementById('detail-files-tbody');
+  const detailFilesEmpty = document.getElementById('detail-files-empty');
+  const detailFilesCount = document.getElementById('detail-files-count');
+  const detailCanvas = document.getElementById('detail-chart-canvas');
+  const shell = document.getElementById('transfers-shell');
+  const DETAIL_URL_TEMPLATE = {{ url_for('api_torrent_detail', gid='__GID_PLACEHOLDER__') | tojson }};
+
   let lastDownloads = null;
-  const chartMap = {};
+  let selectedGid = null;
+  let detailChart = null;
   const speedHistory = {};
   const MAX_POINTS = 120;
 
@@ -59,10 +118,43 @@
     return bps + ' B/s';
   }
 
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GiB';
+    if (n >= 1048576) return (n / 1048576).toFixed(2) + ' MiB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KiB';
+    return n + ' B';
+  }
+
   function esc(s) {
     const d = document.createElement('div');
     d.textContent = s == null ? '' : String(s);
     return d.innerHTML;
+  }
+
+  function isMetadataRow(t) {
+    return String(t.name || '').trim().toUpperCase().startsWith('[METADATA]');
+  }
+
+  function filterMetadataRows(rows) {
+    return (rows || []).filter(function (t) { return !isMetadataRow(t); });
+  }
+
+  function nameFilterQuery() {
+    return (filterInput && filterInput.value ? filterInput.value : '').trim().toLowerCase();
+  }
+
+  function filterRows(rows) {
+    var q = nameFilterQuery();
+    var base = filterMetadataRows(rows);
+    if (!q) return base;
+    return base.filter(function (t) {
+      return String(t.name || t.gid || '').toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  function detailApiUrl(gid) {
+    return DETAIL_URL_TEMPLATE.replace('__GID_PLACEHOLDER__', encodeURIComponent(gid));
   }
 
   function appendHistory(active) {
@@ -83,28 +175,28 @@
     Object.keys(speedHistory).forEach(function (gid) {
       if (!seen.has(gid)) {
         delete speedHistory[gid];
-        if (chartMap[gid]) {
-          try { chartMap[gid].destroy(); } catch (_) {}
-          delete chartMap[gid];
-        }
       }
     });
   }
 
-  function destroyAllCharts() {
-    Object.keys(chartMap).forEach(function (gid) {
-      try { chartMap[gid].destroy(); } catch (_) {}
-      delete chartMap[gid];
-    });
+  function destroyDetailChart() {
+    if (detailChart) {
+      try { detailChart.destroy(); } catch (_) {}
+      detailChart = null;
+    }
   }
 
-  function buildChart(canvas, gid) {
+  function updateDetailChart(gid) {
+    if (!detailCanvas || !gid || typeof Chart === 'undefined') return;
     const hist = speedHistory[gid] || [];
-    const labels = hist.map(function (_, i) { return ''; });
+    const labels = hist.map(function () { return ''; });
     const downs = hist.map(function (h) { return h.down; });
     const ups = hist.map(function (h) { return h.up; });
 
-    const ctx = canvas.getContext('2d');
+    const chartColors = getComputedStyle(document.body);
+    const tick = chartColors.getPropertyValue('--muted').trim() || '#94a3b8';
+    const grid = 'rgba(45, 58, 77, 0.5)';
+
     const cfg = {
       type: 'line',
       data: {
@@ -137,7 +229,7 @@
         maintainAspectRatio: false,
         animation: false,
         plugins: {
-          legend: { display: true, labels: { color: '#94a3b8', font: { size: 10 } } },
+          legend: { display: true, labels: { color: tick, font: { size: 11 } } },
           tooltip: {
             callbacks: {
               label: function (ctx) {
@@ -151,24 +243,63 @@
           y: {
             beginAtZero: true,
             ticks: {
-              color: '#94a3b8',
+              color: tick,
               maxTicksLimit: 5,
               callback: function (v) { return fmtSpeed(v); },
             },
-            grid: { color: 'rgba(45, 58, 77, 0.5)' },
+            grid: { color: grid },
           },
         },
       },
     };
 
-    if (chartMap[gid]) {
-      try { chartMap[gid].destroy(); } catch (_) {}
-      delete chartMap[gid];
+    if (detailChart) {
+      detailChart.data.labels = cfg.data.labels;
+      detailChart.data.datasets[0].data = downs;
+      detailChart.data.datasets[1].data = ups;
+      detailChart.update('none');
+    } else {
+      detailChart = new Chart(detailCanvas.getContext('2d'), cfg);
     }
-    chartMap[gid] = new Chart(ctx, cfg);
   }
 
-  function rowActions(t) {
+  function renderTorrentList() {
+    if (!listMount || !lastDownloads) return;
+    const d = lastDownloads;
+    const sections = [
+      { key: 'active', title: 'Active', rows: filterRows(d.active || []) },
+      { key: 'waiting', title: 'Waiting', rows: filterRows(d.waiting || []) },
+      { key: 'stopped', title: 'Stopped / completed', rows: filterRows((d.stopped || []).slice(0, 120)) },
+    ];
+    let h = '';
+    sections.forEach(function (sec) {
+      h += '<div class="torrent-sec-label">' + esc(sec.title) + '</div>';
+      if (!sec.rows.length) {
+        h += '<p class="muted small torrent-sec-empty">None</p>';
+        return;
+      }
+      sec.rows.forEach(function (t) {
+        const gid = String(t.gid || '');
+        const nm = (t.name || gid).slice(0, 72);
+        const prog = t.progress_percent != null ? t.progress_percent : 0;
+        const spd = t.download_speed_human || fmtSpeed(t.download_speed);
+        const sel = selectedGid === gid ? ' is-selected' : '';
+        const st = esc(t.status || '');
+        h += '<button type="button" class="torrent-list-item' + sel + '" data-gid="' + esc(gid) + '">';
+        h += '<span class="tli-main">';
+        h += '<span class="tli-name" title="' + esc(t.name || '') + '">' + esc(nm) + '</span>';
+        h += '<span class="tli-meta"><span class="tli-pct">' + esc(String(prog)) + '%</span>';
+        if (sec.key === 'active') h += ' · <span class="tli-spd">' + esc(spd) + '</span>';
+        h += '</span></span>';
+        h += '<span class="pill pill-xs">' + st + '</span>';
+        h += '</button>';
+      });
+    });
+    listMount.innerHTML = h;
+  }
+
+  function renderDetailActions(t) {
+    if (!detailActions) return;
     const gidRaw = String(t.gid || '');
     const gidEsc = esc(gidRaw);
     const status = t.status || '';
@@ -181,163 +312,96 @@
       btns += '<button type="button" class="btn btn-sm" data-act="prioritize" data-gid="' + gidEsc + '">Move to top</button>';
     }
     btns += '<button type="button" class="btn btn-sm danger" data-act="remove" data-gid="' + gidEsc + '">Remove</button>';
-    btns += '<label class="inline-check"><input type="checkbox" data-del-files="' + gidEsc + '"> delete files</label>';
-    return '<td class="nowrap">' + btns + '</td>';
+    btns += '<label class="inline-check detail-del-files"><input type="checkbox" id="detail-del-files"> delete files</label>';
+    detailActions.innerHTML = btns;
   }
 
-  function renderActiveTable(rows) {
-    if (!rows.length) {
-      return '<h3 class="sub">Active</h3><p class="muted">No active downloads.</p>';
-    }
-    let h = '<h3 class="sub">Active</h3>';
-    h += '<div class="table-scroll"><table class="torrents"><thead><tr>';
-    h += '<th>Name</th><th>Progress</th><th>Speed chart</th><th>Down</th><th>Up</th><th>ETA</th><th>Pairs</th><th>Seed/Leech</th><th>Status</th><th></th>';
-    h += '</tr></thead><tbody>';
-    rows.forEach(function (t) {
-      const prog = (t.progress_percent != null ? t.progress_percent : 0);
-      const seed = (t.num_seeders != null ? t.num_seeders : '—');
-      const leech = (t.num_leechers != null ? t.num_leechers : '—');
-      const gidRaw = String(t.gid || '');
-      const gidEsc = esc(gidRaw);
-      h += '<tr>';
-      h += '<td class="name" title="' + esc(t.name || '') + '">' + esc((t.name || t.gid).slice(0, 40)) + '</td>';
-      h += '<td>' + esc(String(prog)) + '%</td>';
-      h += '<td class="chart-cell"><div class="chart-wrap"><canvas data-chart-gid="' + gidRaw + '"></canvas></div></td>';
-      h += '<td>' + esc(t.download_speed_human || fmtSpeed(t.download_speed)) + '</td>';
-      h += '<td>' + esc(t.upload_speed_human || fmtSpeed(t.upload_speed)) + '</td>';
-      h += '<td>' + esc(t.eta_human || '—') + '</td>';
-      h += '<td>' + esc(String(t.connections != null ? t.connections : '—')) + '</td>';
-      h += '<td>' + esc(String(seed)) + ' / ' + esc(String(leech)) + '</td>';
-      h += '<td><span class="pill">' + esc(t.status || '') + '</span></td>';
-      h += rowActions(t);
-      h += '</tr>';
-      h += '<tr class="opts-row"><td colspan="10">';
-      h += '<details><summary>Limits / seeding</summary>';
-      h += '<div class="opts-grid">';
-      h += '<label>Max down <input type="text" data-opt="max-download-limit" placeholder="e.g. 4M or 0"></label>';
-      h += '<label>Max up <input type="text" data-opt="max-upload-limit" placeholder="e.g. 1M or 0"></label>';
-      h += '<label>Seed ratio <input type="text" data-opt="seed-ratio" placeholder="default"></label>';
-      h += '<button type="button" class="btn btn-sm primary" data-act="save-opts" data-gid="' + gidEsc + '">Apply options</button>';
-      h += '</div></details>';
-      h += '</td></tr>';
-    });
-    h += '</tbody></table></div>';
-    return h;
+  function fillOptsGrid(gid) {
+    if (!detailOptsGrid) return;
+    const gidEsc = esc(gid);
+    detailOptsGrid.innerHTML =
+      '<label>Max down <input type="text" data-opt="max-download-limit" placeholder="e.g. 4M or 0"></label>' +
+      '<label>Max up <input type="text" data-opt="max-upload-limit" placeholder="e.g. 1M or 0"></label>' +
+      '<label>Seed ratio <input type="text" data-opt="seed-ratio" placeholder="default"></label>';
+    document.getElementById('detail-save-opts').setAttribute('data-gid', gid);
   }
 
-  function renderPlainTable(title, rows, emptyMsg, cols) {
-    cols = cols || 9;
-    if (!rows.length) {
-      return '<h3 class="sub">' + esc(title) + '</h3><p class="muted">' + esc(emptyMsg) + '</p>';
-    }
-    let h = '<h3 class="sub">' + esc(title) + '</h3>';
-    h += '<div class="table-scroll"><table class="torrents"><thead><tr>';
-    h += '<th>Name</th><th>Progress</th><th>Down</th><th>Up</th><th>ETA</th><th>Pairs</th><th>Seed/Leech</th><th>Status</th><th></th>';
-    h += '</tr></thead><tbody>';
-    rows.forEach(function (t) {
-      const prog = (t.progress_percent != null ? t.progress_percent : 0);
-      const seed = (t.num_seeders != null ? t.num_seeders : '—');
-      const leech = (t.num_leechers != null ? t.num_leechers : '—');
-      h += '<tr>';
-      h += '<td class="name" title="' + esc(t.name || '') + '">' + esc((t.name || t.gid).slice(0, 48)) + '</td>';
-      h += '<td>' + esc(String(prog)) + '%</td>';
-      h += '<td>' + esc(t.download_speed_human || fmtSpeed(t.download_speed)) + '</td>';
-      h += '<td>' + esc(t.upload_speed_human || fmtSpeed(t.upload_speed)) + '</td>';
-      h += '<td>' + esc(t.eta_human || '—') + '</td>';
-      h += '<td>' + esc(String(t.connections != null ? t.connections : '—')) + '</td>';
-      h += '<td>' + esc(String(seed)) + ' / ' + esc(String(leech)) + '</td>';
-      h += '<td><span class="pill">' + esc(t.status || '') + '</span></td>';
-      h += rowActions(t);
-      h += '</tr>';
-      h += '<tr class="opts-row"><td colspan="' + cols + '">';
-      h += '<details><summary>Limits / seeding</summary>';
-      h += '<div class="opts-grid">';
-      h += '<label>Max down <input type="text" data-opt="max-download-limit" placeholder="e.g. 4M or 0"></label>';
-      h += '<label>Max up <input type="text" data-opt="max-upload-limit" placeholder="e.g. 1M or 0"></label>';
-      h += '<label>Seed ratio <input type="text" data-opt="seed-ratio" placeholder="default"></label>';
-      h += '<button type="button" class="btn btn-sm primary" data-act="save-opts" data-gid="' + esc(t.gid) + '">Apply options</button>';
-      h += '</div></details>';
-      h += '</td></tr>';
-    });
-    h += '</tbody></table></div>';
-    return h;
-  }
+  function applyDetailPayload(data) {
+    detailErr.classList.add('hidden');
+    detailErr.textContent = '';
+    const t = data.torrent;
+    if (!t || !t.gid) return;
 
-  torrentRoot.addEventListener('click', async function (e) {
-    const btn = e.target.closest('button[data-act]');
-    if (!btn) return;
-    const act = btn.getAttribute('data-act');
-    const gid = btn.getAttribute('data-gid');
-    if (!gid) return;
-    if (act === 'save-opts') {
-      const trOpts = btn.closest('tr');
-      const opts = {};
-      if (!trOpts) return;
-      trOpts.querySelectorAll('input[data-opt]').forEach(function (inp) {
-        const k = inp.getAttribute('data-opt');
-        const v = inp.value.trim();
-        if (v) opts[k] = v;
+    detailTitle.textContent = t.name || t.gid;
+    detailStatus.textContent = t.status || '—';
+
+    const seed = t.num_seeders != null ? t.num_seeders : '—';
+    const leech = t.num_leechers != null ? t.num_leechers : '—';
+    detailChips.innerHTML =
+      '<span class="chip chip-down">↓ ' + esc(t.download_speed_human || fmtSpeed(t.download_speed)) + '</span>' +
+      '<span class="chip chip-up">↑ ' + esc(t.upload_speed_human || fmtSpeed(t.upload_speed)) + '</span>' +
+      '<span class="chip">' + esc(t.eta_human || '—') + ' ETA</span>' +
+      '<span class="chip">' + esc(String(t.connections != null ? t.connections : '—')) + ' conn</span>' +
+      '<span class="chip">Seeds ' + esc(String(seed)) + ' / Leech ' + esc(String(leech)) + '</span>';
+
+    const files = data.files || [];
+    detailFilesCount.textContent = files.length ? files.length + ' file(s)' : '';
+    if (!files.length) {
+      detailFilesTbody.innerHTML = '';
+      detailFilesEmpty.classList.remove('hidden');
+    } else {
+      detailFilesEmpty.classList.add('hidden');
+      let fh = '';
+      files.forEach(function (f) {
+        const pct = Math.min(100, Math.max(0, f.progress_percent || 0));
+        fh += '<tr>';
+        fh += '<td class="tab-num">' + esc(String(f.index)) + '</td>';
+        fh += '<td class="detail-file-path" title="' + esc(f.path || '') + '">' + esc((f.path_display || f.path || '').slice(0, 80)) + '</td>';
+        fh += '<td><div class="file-progress-wrap" title="' + esc(String(pct)) + '%"><div class="file-progress-fill" style="width:' + pct + '%"></div></div></td>';
+        fh += '<td class="tab-num muted">' + esc(f.length_human || fmtBytes(f.length)) + '</td>';
+        fh += '</tr>';
       });
-      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + '/options', {
-        method: 'POST',
-        headers: headersJson(),
-        body: JSON.stringify({ options: opts }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert(err.error || res.statusText);
-      }
+      detailFilesTbody.innerHTML = fh;
+    }
+
+    renderDetailActions(t);
+    fillOptsGrid(t.gid);
+    updateDetailChart(t.gid);
+  }
+
+  async function loadDetailPanel() {
+    if (!selectedGid) {
+      detailEmpty.classList.remove('hidden');
+      detailBody.classList.add('hidden');
+      destroyDetailChart();
       return;
     }
-    if (act === 'remove') {
-      const box = torrentRoot.querySelector('input[data-del-files="' + gid + '"]');
-      const delFiles = box && box.checked;
-      const q = delFiles ? '?delete_files=1' : '';
-      if (!confirm('Remove this torrent from aria2?' + (delFiles ? ' Files on disk will be deleted.' : ''))) return;
-      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + q, {
-        method: 'DELETE',
-        headers: headersJson(),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert(err.error || res.statusText);
+    detailEmpty.classList.add('hidden');
+    detailBody.classList.remove('hidden');
+    try {
+      const res = await fetch(detailApiUrl(selectedGid));
+      if (res.status === 404) {
+        detailErr.textContent = 'This download is no longer in aria2.';
+        detailErr.classList.remove('hidden');
+        selectedGid = null;
+        renderTorrentList();
+        detailEmpty.classList.remove('hidden');
+        detailBody.classList.add('hidden');
+        destroyDetailChart();
+        return;
       }
-      pollTorrents();
-      return;
-    }
-    if (act === 'prioritize') {
-      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + '/prioritize', {
-        method: 'POST',
-        headers: headersJson(),
-      });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert(err.error || res.statusText);
+        const err = await res.json().catch(function () { return {}; });
+        detailErr.textContent = err.error || res.statusText;
+        detailErr.classList.remove('hidden');
+        return;
       }
-      pollTorrents();
-      return;
+      const data = await res.json();
+      applyDetailPayload(data);
+    } catch (e) {
+      detailErr.textContent = 'Could not load details.';
+      detailErr.classList.remove('hidden');
     }
-    const path = act === 'pause'
-      ? '/api/torrents/' + encodeURIComponent(gid) + '/pause'
-      : '/api/torrents/' + encodeURIComponent(gid) + '/resume';
-    const res = await fetch(path, { method: 'POST', headers: headersJson() });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      alert(err.error || res.statusText);
-    }
-    pollTorrents();
-  });
-
-  function nameFilterQuery() {
-    return (filterInput && filterInput.value ? filterInput.value : '').trim().toLowerCase();
-  }
-
-  function filterRows(rows) {
-    var q = nameFilterQuery();
-    if (!q) return rows || [];
-    return (rows || []).filter(function (t) {
-      return String(t.name || t.gid || '').toLowerCase().indexOf(q) !== -1;
-    });
   }
 
   function renderTorrentTables() {
@@ -353,29 +417,24 @@
       '<span class="chip chip-up">↑ ' + esc(uh) + '</span>' +
       '<span class="chip">Active ' + esc(String(na)) + '</span>';
 
-    const activeRaw = d.active || [];
+    const activeRaw = filterMetadataRows(lastDownloads.active || []);
     appendHistory(activeRaw);
-    const active = filterRows(activeRaw);
-    destroyAllCharts();
+    renderTorrentList();
 
-    torrentRoot.innerHTML =
-      renderActiveTable(active) +
-      renderPlainTable('Waiting', filterRows(d.waiting || []), 'Queue empty.', 9) +
-      renderPlainTable('Stopped / completed', filterRows((d.stopped || []).slice(0, 80)), 'No history.', 9) +
-      '<p class="small muted"><button type="button" class="btn btn-sm" id="purge-stopped">Clear stopped history</button></p>';
+    if (selectedGid) {
+      const visible = []
+        .concat(filterRows(d.active || []), filterRows(d.waiting || []), filterRows((d.stopped || []).slice(0, 120)));
+      const still = visible.some(function (t) { return t.gid === selectedGid; });
+      if (!still) {
+        selectedGid = null;
+        detailEmpty.classList.remove('hidden');
+        detailBody.classList.add('hidden');
+        destroyDetailChart();
+      }
+    }
 
-    torrentRoot.querySelectorAll('canvas[data-chart-gid]').forEach(function (canvas) {
-      const gid = canvas.getAttribute('data-chart-gid');
-      if (gid) buildChart(canvas, gid);
-    });
-
-    const purgeBtn = document.getElementById('purge-stopped');
-    if (purgeBtn) {
-      purgeBtn.addEventListener('click', async function () {
-        if (!confirm('Purge stopped download results from aria2?')) return;
-        await fetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
-        pollTorrents();
-      });
+    if (selectedGid) {
+      loadDetailPanel();
     }
   }
 
@@ -385,7 +444,7 @@
       if (res.status === 401) return;
       const data = await res.json();
       if (!res.ok) {
-        torrentRoot.innerHTML = '<p class="error">' + esc(data.error || res.statusText) + '</p>';
+        listMount.innerHTML = '<p class="error">' + esc(data.error || res.statusText) + '</p>';
         return;
       }
       const d = data.downloads || {};
@@ -395,6 +454,94 @@
       renderTorrentTables();
     } catch (_) {}
   }
+
+  if (listMount) {
+    listMount.addEventListener('click', function (e) {
+      const btn = e.target.closest('.torrent-list-item');
+      if (!btn) return;
+      const gid = btn.getAttribute('data-gid');
+      if (!gid) return;
+      selectedGid = gid;
+      renderTorrentList();
+      loadDetailPanel();
+    });
+  }
+
+  if (shell) shell.addEventListener('click', async function (e) {
+    const saveBtn = e.target.closest('#detail-save-opts');
+    if (saveBtn) {
+      const gid = saveBtn.getAttribute('data-gid');
+      if (!gid) return;
+      const opts = {};
+      detailOptsGrid.querySelectorAll('input[data-opt]').forEach(function (inp) {
+        const k = inp.getAttribute('data-opt');
+        const v = inp.value.trim();
+        if (v) opts[k] = v;
+      });
+      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + '/options', {
+        method: 'POST',
+        headers: headersJson(),
+        body: JSON.stringify({ options: opts }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(function () { return {}; });
+        alert(err.error || res.statusText);
+      }
+      return;
+    }
+
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const act = btn.getAttribute('data-act');
+    const gid = btn.getAttribute('data-gid');
+    if (!gid) return;
+
+    if (act === 'remove') {
+      const box = document.getElementById('detail-del-files');
+      const delFiles = box && box.checked;
+      const q = delFiles ? '?delete_files=1' : '';
+      if (!confirm('Remove this torrent from aria2?' + (delFiles ? ' Files on disk will be deleted.' : ''))) return;
+      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + q, {
+        method: 'DELETE',
+        headers: headersJson(),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(function () { return {}; });
+        alert(err.error || res.statusText);
+        return;
+      }
+      if (selectedGid === gid) selectedGid = null;
+      pollTorrents();
+      return;
+    }
+    if (act === 'prioritize') {
+      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + '/prioritize', {
+        method: 'POST',
+        headers: headersJson(),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(function () { return {}; });
+        alert(err.error || res.statusText);
+      }
+      pollTorrents();
+      return;
+    }
+    const path = act === 'pause'
+      ? '/api/torrents/' + encodeURIComponent(gid) + '/pause'
+      : '/api/torrents/' + encodeURIComponent(gid) + '/resume';
+    const res = await fetch(path, { method: 'POST', headers: headersJson() });
+    if (!res.ok) {
+      const err = await res.json().catch(function () { return {}; });
+      alert(err.error || res.statusText);
+    }
+    pollTorrents();
+  });
+
+  document.getElementById('purge-stopped').addEventListener('click', async function () {
+    if (!confirm('Purge stopped download results from aria2?')) return;
+    await fetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
+    pollTorrents();
+  });
 
   function clearMagnetForm(form) {
     if (!form) return;
@@ -437,7 +584,7 @@
         headers: headersJson(),
         body: JSON.stringify({ magnet: magnet, parent: parentVal }),
       });
-      const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(function () { return ({}); });
       if (!res.ok) {
         magnetMsg.textContent = data.error || res.statusText;
         magnetMsg.classList.remove('hidden');

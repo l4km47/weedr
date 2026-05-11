@@ -37,7 +37,13 @@ from flask_limiter import Limiter
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash
 
-from aria2_service import Aria2RPCError, fetch_all_downloads, get_service, global_stat
+from aria2_service import (
+    Aria2RPCError,
+    fetch_all_downloads,
+    fetch_download_detail,
+    get_service,
+    global_stat,
+)
 from magnet_util import auto_subfolder_name, parse_magnet, pick_unique_dir
 from pathutil import safe_under_root
 from zip_jobs_store import ZipJobsStore
@@ -909,6 +915,23 @@ def create_app() -> Flask:
             return jsonify({"error": str(e)}), 503
         _torrent_fire_notifications(data)
         return jsonify({"downloads": data, "meta": gs})
+
+    @app.route("/api/torrents/<gid>/detail", methods=["GET"])
+    @limiter.limit("120 per minute")
+    def api_torrent_detail(gid: str):
+        """Per-torrent status + file list with byte progress (master–detail UI)."""
+        _auth_json()
+        gid = gid.strip()
+        if not gid:
+            return jsonify({"error": "Invalid gid"}), 400
+        try:
+            svc = ensure_aria2()
+            detail = fetch_download_detail(svc, gid)
+        except Aria2RPCError as e:
+            return jsonify({"error": str(e)}), 503
+        if detail is None:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(detail)
 
     @app.route("/api/fs/stats", methods=["GET"])
     @limiter.limit("120 per minute")

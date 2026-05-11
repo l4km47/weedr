@@ -283,6 +283,14 @@ def format_speed(bps: int) -> str:
     return f"{bps} B/s"
 
 
+def format_size_bytes(n: int) -> str:
+    n = max(0, int(n))
+    for suf, div in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if n >= div:
+            return f"{n / div:.2f} {suf}"
+    return f"{n} B"
+
+
 def _parse_bps_value(v: Any) -> int:
     if v is None:
         return 0
@@ -429,7 +437,87 @@ def fetch_all_downloads(svc: Aria2Service) -> dict[str, list[dict[str, Any]]]:
     active = fetch_list("aria2.tellActive", [keys])
     waiting = fetch_list("aria2.tellWaiting", [0, 1000, keys])
     stopped = fetch_list("aria2.tellStopped", [0, 1000, keys])
-    return {"active": active, "waiting": waiting, "stopped": stopped}
+    return {
+        "active": _hide_metadata_placeholders(active),
+        "waiting": _hide_metadata_placeholders(waiting),
+        "stopped": _hide_metadata_placeholders(stopped),
+    }
+
+
+def _hide_metadata_placeholders(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    aria2 creates a separate BitTorrent download named '[METADATA]…' while resolving magnets.
+    Hide those rows in the UI so each torrent appears once.
+    """
+    out: list[dict[str, Any]] = []
+    for d in rows:
+        name = (d.get("name") or "").lstrip()
+        if name.upper().startswith("[METADATA]"):
+            continue
+        out.append(d)
+    return out
+
+
+def fetch_download_detail(svc: Aria2Service, gid: str) -> dict[str, Any] | None:
+    """Full tellStatus + per-file progress for the transfers detail pane."""
+    detail_keys = [
+        "gid",
+        "status",
+        "totalLength",
+        "completedLength",
+        "downloadSpeed",
+        "uploadSpeed",
+        "connections",
+        "errorCode",
+        "errorMessage",
+        "dir",
+        "files",
+        "bittorrent",
+        "pieceLength",
+        "numPieces",
+        "numSeeders",
+        "numLeechers",
+        "followedBy",
+        "following",
+        "belongsTo",
+    ]
+    try:
+        raw = svc.call("aria2.tellStatus", [gid, detail_keys])
+    except Aria2RPCError:
+        return None
+    if not isinstance(raw, dict) or not raw.get("gid"):
+        return None
+
+    torrent = normalize_download(raw)
+    files_out: list[dict[str, Any]] = []
+    for f in raw.get("files") or []:
+        if not isinstance(f, dict):
+            continue
+        try:
+            idx = int(str(f.get("index") or "0"))
+        except ValueError:
+            idx = 0
+        path = str(f.get("path") or "")
+        tl = int(f.get("length") or 0)
+        cl = int(f.get("completedLength") or 0)
+        selected_raw = f.get("selected")
+        sel = str(selected_raw).lower() in ("true", "1")
+        pct = round(100.0 * cl / tl, 2) if tl > 0 else 0.0
+        disp = Path(path).name if path else ""
+        files_out.append(
+            {
+                "index": idx,
+                "path": path,
+                "path_display": disp or path,
+                "length": tl,
+                "length_human": format_size_bytes(tl),
+                "completed_length": cl,
+                "progress_percent": pct,
+                "selected": sel,
+            }
+        )
+    files_out.sort(key=lambda x: x["index"])
+    return {"torrent": torrent, "files": files_out}
 
 
 def global_stat(svc: Aria2Service) -> dict[str, Any]:
