@@ -449,16 +449,6 @@ def _apply_zip_retention() -> None:
             _delete_zip_artifacts(jid)
 
 
-def _remove_aria2_download_best_effort(svc: Any, gid: str) -> None:
-    try:
-        svc.call("aria2.remove", [gid])
-    except Aria2RPCError:
-        try:
-            svc.call("aria2.removeDownloadResult", [gid])
-        except Aria2RPCError:
-            pass
-
-
 def _torrent_fire_notifications(data: dict[str, list[dict[str, Any]]]) -> None:
     """Detect transitions into terminal aria2 states and emit webhooks / audit."""
     global _torrent_status_prev
@@ -488,35 +478,6 @@ def _torrent_fire_notifications(data: dict[str, list[dict[str, Any]]]) -> None:
     with _torrent_status_lock:
         _torrent_status_prev.clear()
         _torrent_status_prev.update(new_prev)
-
-
-def wait_for_torrent_total_length(svc: Any, gid: str, timeout: float = 120.0) -> int:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            st = svc.call(
-                "aria2.tellStatus",
-                [gid, ["totalLength", "status", "errorMessage", "errorCode"]],
-            )
-        except Aria2RPCError:
-            time.sleep(0.35)
-            continue
-        if not isinstance(st, dict):
-            time.sleep(0.35)
-            continue
-        if st.get("status") == "error":
-            msg = st.get("errorMessage") or st.get("errorCode") or "unknown error"
-            _remove_aria2_download_best_effort(svc, gid)
-            raise Aria2RPCError(f"Torrent failed: {msg}")
-        tl = int(st.get("totalLength") or 0)
-        if tl > 0:
-            return tl
-        time.sleep(0.35)
-    _remove_aria2_download_best_effort(svc, gid)
-    raise Aria2RPCError(
-        "Timeout waiting for torrent size (metadata). "
-        "Try again, or add &xl=BYTES to the magnet if the indexer provides it."
-    )
 
 
 def create_app() -> Flask:
@@ -839,66 +800,17 @@ def create_app() -> Flask:
         folder_label = auto_subfolder_name(parsed.get("dn"), str(parsed["btih"]))
         final_dir = pick_unique_dir(base, folder_label)
 
-        du = shutil.disk_usage(DOWNLOAD_DIR)
-        reserve = _disk_reserve(du)
-        free_effective = max(0, du.free - reserve)
-
         options: dict[str, Any] = {
             "dir": str(final_dir),
             "seed-time": os.environ.get("ARIA2_SEED_TIME", "0"),
             "seed-ratio": os.environ.get("ARIA2_SEED_RATIO", "0"),
         }
 
-        xl_bytes = parsed.get("xl")
-        need_metadata = not (isinstance(xl_bytes, int) and xl_bytes > 0)
-
-        if isinstance(xl_bytes, int) and xl_bytes > 0:
-            if xl_bytes > free_effective:
-                return (
-                    {
-                        "error": (
-                            f"Not enough free space (after reserve). Need {_human_bytes(xl_bytes)}, "
-                            f"effective free {_human_bytes(free_effective)}."
-                        ),
-                        "need_bytes": xl_bytes,
-                        "free_effective_bytes": free_effective,
-                    },
-                    400,
-                )
-        else:
-            options["pause"] = "true"
-
         try:
             svc = ensure_aria2()
             gid = svc.call("aria2.addUri", [[magnet], options])
         except Aria2RPCError as e:
             return {"error": str(e)}, 503
-
-        if need_metadata:
-            try:
-                total_len = wait_for_torrent_total_length(svc, gid)
-            except Aria2RPCError as e:
-                return {"error": str(e)}, 400
-            du2 = shutil.disk_usage(DOWNLOAD_DIR)
-            reserve2 = _disk_reserve(du2)
-            free2 = max(0, du2.free - reserve2)
-            if total_len > free2:
-                _remove_aria2_download_best_effort(svc, gid)
-                return (
-                    {
-                        "error": (
-                            f"Not enough free space for this torrent (~{_human_bytes(total_len)}). "
-                            f"Effective free {_human_bytes(free2)}."
-                        ),
-                        "need_bytes": total_len,
-                        "free_effective_bytes": free2,
-                    },
-                    400,
-                )
-            try:
-                svc.call("aria2.unpause", [gid])
-            except Aria2RPCError as e:
-                return {"error": str(e)}, 503
 
         rel_dir = str(final_dir.relative_to(DOWNLOAD_DIR)).replace("\\", "/")
         return {"ok": True, "gid": gid, "save_folder": rel_dir}, 200

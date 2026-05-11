@@ -6,8 +6,7 @@
 <div class="header-add-toolbar">
   <form id="magnet-form" class="magnet-inline-form">
     <label class="sr-only" for="magnet">Magnet link</label>
-    <input type="text" id="magnet" name="magnet" class="magnet-inline-field magnet-inline-magnet" placeholder="Magnet URI — tap to paste" autocomplete="off" spellcheck="false" required inputmode="url">
-    <input type="text" id="magnet-parent" name="parent" class="magnet-inline-field magnet-inline-parent" placeholder="Subfolder (optional)" autocomplete="off" spellcheck="false" title="Created under this folder inside your download directory">
+    <input type="text" id="magnet" name="magnet" class="magnet-inline-field magnet-inline-magnet" placeholder="Magnet URI — paste or tap to pull from clipboard" autocomplete="off" spellcheck="false" inputmode="text">
     <button type="submit" class="btn primary btn-sm magnet-inline-submit">Add</button>
   </form>
   <label class="sr-only" for="torrent-filter">Filter</label>
@@ -79,9 +78,14 @@
 
 <script>
 (function () {
-  const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+  const csrfMeta = document.querySelector('meta[name="csrf-token"]');
+  const csrfToken = csrfMeta ? (csrfMeta.getAttribute('content') || '') : '';
   function headersJson() {
-    return { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken };
+    const h = { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken };
+    return h;
+  }
+  function apiFetch(url, init) {
+    return fetch(url, Object.assign({ credentials: 'same-origin' }, init || {}));
   }
 
   const listMount = document.getElementById('torrent-list-mount');
@@ -379,7 +383,7 @@
     detailEmpty.classList.add('hidden');
     detailBody.classList.remove('hidden');
     try {
-      const res = await fetch(detailApiUrl(selectedGid));
+      const res = await apiFetch(detailApiUrl(selectedGid));
       if (res.status === 404) {
         detailErr.textContent = 'This download is no longer in aria2.';
         detailErr.classList.remove('hidden');
@@ -440,7 +444,7 @@
 
   async function pollTorrents() {
     try {
-      const res = await fetch('{{ url_for("api_torrents_list") }}');
+      const res = await apiFetch('{{ url_for("api_torrents_list") }}');
       if (res.status === 401) return;
       const data = await res.json();
       if (!res.ok) {
@@ -478,7 +482,7 @@
         const v = inp.value.trim();
         if (v) opts[k] = v;
       });
-      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + '/options', {
+      const res = await apiFetch('/api/torrents/' + encodeURIComponent(gid) + '/options', {
         method: 'POST',
         headers: headersJson(),
         body: JSON.stringify({ options: opts }),
@@ -501,7 +505,7 @@
       const delFiles = box && box.checked;
       const q = delFiles ? '?delete_files=1' : '';
       if (!confirm('Remove this torrent from aria2?' + (delFiles ? ' Files on disk will be deleted.' : ''))) return;
-      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + q, {
+      const res = await apiFetch('/api/torrents/' + encodeURIComponent(gid) + q, {
         method: 'DELETE',
         headers: headersJson(),
       });
@@ -515,7 +519,7 @@
       return;
     }
     if (act === 'prioritize') {
-      const res = await fetch('/api/torrents/' + encodeURIComponent(gid) + '/prioritize', {
+      const res = await apiFetch('/api/torrents/' + encodeURIComponent(gid) + '/prioritize', {
         method: 'POST',
         headers: headersJson(),
       });
@@ -529,7 +533,7 @@
     const path = act === 'pause'
       ? '/api/torrents/' + encodeURIComponent(gid) + '/pause'
       : '/api/torrents/' + encodeURIComponent(gid) + '/resume';
-    const res = await fetch(path, { method: 'POST', headers: headersJson() });
+    const res = await apiFetch(path, { method: 'POST', headers: headersJson() });
     if (!res.ok) {
       const err = await res.json().catch(function () { return {}; });
       alert(err.error || res.statusText);
@@ -539,7 +543,7 @@
 
   document.getElementById('purge-stopped').addEventListener('click', async function () {
     if (!confirm('Purge stopped download results from aria2?')) return;
-    await fetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
+    await apiFetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
     pollTorrents();
   });
 
@@ -548,8 +552,6 @@
     form.reset();
     var m = form.elements.namedItem('magnet');
     if (m && 'value' in m) m.value = '';
-    var p = form.elements.namedItem('parent');
-    if (p && 'value' in p) p.value = '';
   }
 
   if (magnetForm) {
@@ -557,6 +559,7 @@
     var clipboardTapLock = false;
     if (magnetInput && magnetInput instanceof HTMLInputElement) {
       magnetInput.addEventListener('click', async function () {
+        if (magnetInput.value.trim()) return;
         if (clipboardTapLock) return;
         clipboardTapLock = true;
         setTimeout(function () { clipboardTapLock = false; }, 500);
@@ -577,12 +580,28 @@
       magnetMsg.classList.add('hidden');
       var magnetEl = magnetForm.elements.namedItem('magnet');
       var magnet = magnetEl && magnetEl.value ? magnetEl.value.trim() : '';
-      var parentEl = magnetForm.elements.namedItem('parent');
-      var parentVal = parentEl && parentEl.value ? String(parentEl.value).trim() : '';
-      const res = await fetch('{{ url_for("api_torrents_add") }}', {
+      if (!magnet) {
+        magnetMsg.textContent = 'Paste a magnet link first.';
+        magnetMsg.classList.remove('hidden', 'ok');
+        magnetMsg.classList.add('error');
+        return;
+      }
+      if (!magnet.toLowerCase().startsWith('magnet:')) {
+        magnetMsg.textContent = 'That does not look like a magnet URI (should start with magnet:).';
+        magnetMsg.classList.remove('hidden', 'ok');
+        magnetMsg.classList.add('error');
+        return;
+      }
+      if (!csrfToken) {
+        magnetMsg.textContent = 'Missing CSRF token — reload the page.';
+        magnetMsg.classList.remove('hidden', 'ok');
+        magnetMsg.classList.add('error');
+        return;
+      }
+      const res = await apiFetch('{{ url_for("api_torrents_add") }}', {
         method: 'POST',
         headers: headersJson(),
-        body: JSON.stringify({ magnet: magnet, parent: parentVal }),
+        body: JSON.stringify({ magnet: magnet }),
       });
       const data = await res.json().catch(function () { return ({}); });
       if (!res.ok) {

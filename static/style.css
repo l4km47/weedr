@@ -711,10 +711,6 @@ pre.log {
   flex: 1 1 180px;
 }
 
-.magnet-inline-parent {
-  flex: 0 1 140px;
-}
-
 .magnet-inline-filter {
   flex: 0 1 160px;
   margin-left: 0.25rem;
