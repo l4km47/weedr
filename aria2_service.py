@@ -127,8 +127,8 @@ def aria2_download_limit_string() -> str:
 def aria2_throughput_rpc_options() -> dict[str, str]:
     """Per-download options for aria2.addUri (string values per RPC)."""
     max_conn = str(_parse_positive_int("ARIA2_MAX_CONNECTION_PER_SERVER", 16))
-    split = str(_parse_positive_int("ARIA2_SPLIT", 64))
-    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "10M").strip() or "10M"
+    split = str(_parse_positive_int("ARIA2_SPLIT", 16))
+    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "1M").strip() or "1M"
     ul = aria2_upload_limit_string()
     dl = aria2_download_limit_string()
     return {
@@ -141,23 +141,23 @@ def aria2_throughput_rpc_options() -> dict[str, str]:
 
 
 def _aria2_file_allocation_arg() -> str:
-    fa = (os.environ.get("ARIA2_FILE_ALLOCATION") or "none").strip().lower()
+    fa = (os.environ.get("ARIA2_FILE_ALLOCATION") or "falloc").strip().lower()
     if fa not in ("none", "prealloc", "trunc", "falloc"):
-        fa = "none"
+        fa = "falloc"
     return f"--file-allocation={fa}"
 
 
 def _aria2_throughput_args() -> list[str]:
     """
-    Defaults match common home/VPS BitTorrent tuning; override via env.
-    Restart aria2 after changes.
+    Default throughput matches a typical high-performance aria2.conf
+    (split / connections / disk cache). Override via env; restart aria2 after changes.
     """
     max_conn = _parse_positive_int("ARIA2_MAX_CONNECTION_PER_SERVER", 16)
-    split = _parse_positive_int("ARIA2_SPLIT", 64)
-    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "10M").strip() or "10M"
+    split = _parse_positive_int("ARIA2_SPLIT", 16)
+    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "1M").strip() or "1M"
     bt_peers = _parse_positive_int("ARIA2_BT_MAX_PEERS", 100)
     bt_open = _parse_positive_int("ARIA2_BT_MAX_OPEN_FILES", 1000)
-    disk_raw = (os.environ.get("ARIA2_DISK_CACHE") or "128M").strip()
+    disk_raw = (os.environ.get("ARIA2_DISK_CACHE") or "64M").strip()
     upl = aria2_upload_limit_string()
     dl = aria2_download_limit_string()
 
@@ -179,9 +179,11 @@ def _aria2_throughput_args() -> list[str]:
 
 
 def _aria2_bt_daemon_flags() -> list[str]:
-    """DHT/LPD and encryption flags for the managed daemon."""
-    dht_port = (os.environ.get("ARIA2_DHT_LISTEN_PORT") or "6881-6999").strip() or "6881-6999"
+    """DHT/LPD, listen port, optional encryption for the managed daemon."""
+    listen = (os.environ.get("ARIA2_LISTEN_PORT") or "6881-6999").strip() or "6881-6999"
+    dht_port = (os.environ.get("ARIA2_DHT_LISTEN_PORT") or listen).strip() or listen
     flags: list[str] = [
+        f"--listen-port={listen}",
         f"--dht-listen-port={dht_port}",
         f"--bt-enable-lpd={str(_env_bool('ARIA2_BT_ENABLE_LPD', True)).lower()}",
         f"--bt-force-encryption={str(_env_bool('ARIA2_BT_FORCE_ENCRYPTION', True)).lower()}",

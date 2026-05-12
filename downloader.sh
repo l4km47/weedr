@@ -193,13 +193,14 @@ echo "Starting download to: $DOWNLOAD_DIR"
     --max-download-limit=0 \
     --max-overall-upload-limit=0 \
     --max-upload-limit=0 \
-    --file-allocation=none \
-    --disk-cache=128M \
+    --file-allocation=falloc \
+    --disk-cache=64M \
     --bt-save-metadata=true \
     --bt-tracker="$PUBLIC_TRACKERS" \
     --enable-dht=true \
     --enable-dht6=true \
     --bt-enable-lpd=true \
+    --listen-port=6881-6999 \
     --dht-listen-port=6881-6999 \
     --bt-max-peers=100 \
     --bt-force-encryption=true \
@@ -207,8 +208,8 @@ echo "Starting download to: $DOWNLOAD_DIR"
     --dht-file-path6="$ARIA2_DHT6_FILE" \
     --follow-torrent=mem \
     --max-connection-per-server=16 \
-    --split=64 \
-    --min-split-size=10M \
+    --split=16 \
+    --min-split-size=1M \
     "$MAGNET_URL"
 
 # ---------- Report ----------

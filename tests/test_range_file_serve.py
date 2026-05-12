@@ -76,6 +76,24 @@ def test_head_no_body(app_ctx, tmp_path: Path):
     assert r.headers.get("Content-Length") == "2"
 
 
+def test_open_ended_range(app_ctx, tmp_path: Path):
+    p = tmp_path / "b.bin"
+    p.write_bytes(b"0123456789")
+    etag, lm = "1-2", datetime(1994, 11, 6, tzinfo=timezone.utc)
+    r = range_file_download_response(
+        p,
+        download_name="b.bin",
+        mimetype="application/octet-stream",
+        etag=etag,
+        last_modified=lm,
+        method="GET",
+        range_header="bytes=3-",
+        if_range_header=None,
+    )
+    assert r.status_code == 206
+    assert r.get_data() == b"3456789"
+
+
 def test_empty_file_200(app_ctx, tmp_path: Path):
     p = tmp_path / "empty.bin"
     p.write_bytes(b"")
