@@ -31,6 +31,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_file,
     session,
     url_for,
 )
@@ -48,7 +49,6 @@ from aria2_service import (
 )
 from magnet_util import auto_subfolder_name, parse_magnet, pick_unique_dir
 from pathutil import safe_under_root
-from range_file_serve import range_file_download_response
 from zip_jobs_store import ZipJobsStore
 
 try:
@@ -1433,16 +1433,20 @@ def create_app() -> Flask:
             with _file_download_lock:
                 _active_http_downloads[conn_id] = entry
 
-        resp = range_file_download_response(
-            zp,
-            download_name=download_name,
+        # Werkzeug send_file (path-based) matches what IDM/FDM expect for Range + Content-Length;
+        # a streaming Iterator Response often looks like "no resume" to those tools even when browsers work.
+        resp = send_file(
             mimetype="application/zip",
+            as_attachment=True,
+            download_name=download_name,
+            conditional=True,
             etag=etag_val,
             last_modified=lm_anchor,
-            method=request.method,
-            range_header=request.headers.get("Range"),
-            if_range_header=request.headers.get("If-Range"),
         )
+        resp.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
+        resp.headers["X-Accel-Buffering"] = "no"
+        if not resp.headers.get("Accept-Ranges"):
+            resp.headers["Accept-Ranges"] = "bytes"
 
         if conn_id is not None:
 
@@ -1493,16 +1497,19 @@ def create_app() -> Flask:
         etag_val, lm_anchor = _http_download_validators(full)
         guessed, _ = mimetypes.guess_type(full.name)
         mimetype = guessed or "application/octet-stream"
-        resp = range_file_download_response(
+        resp = send_file(
             full,
-            download_name=full.name,
             mimetype=mimetype,
+            as_attachment=True,
+            download_name=full.name,
+            conditional=True,
             etag=etag_val,
             last_modified=lm_anchor,
-            method=request.method,
-            range_header=request.headers.get("Range"),
-            if_range_header=request.headers.get("If-Range"),
         )
+        resp.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
+        resp.headers["X-Accel-Buffering"] = "no"
+        if not resp.headers.get("Accept-Ranges"):
+            resp.headers["Accept-Ranges"] = "bytes"
 
         if conn_id is not None:
 
