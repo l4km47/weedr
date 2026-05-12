@@ -43,6 +43,33 @@ def _parse_positive_int(name: str, default: int) -> int:
         return default
 
 
+def aria2_upload_limit_string() -> str:
+    """
+    aria2 treats upload limit 0 as *unlimited*. Default to a small cap so
+    "minimal upload" is the out-of-the-box behavior (tunable via env).
+    """
+    raw = (
+        os.environ.get("ARIA2_MAX_UPLOAD_LIMIT")
+        or os.environ.get("ARIA2_MAX_OVERALL_UPLOAD_LIMIT")
+        or "1K"
+    ).strip()
+    return raw or "1K"
+
+
+def aria2_throughput_rpc_options() -> dict[str, str]:
+    """Per-download options for aria2.addUri (string values per RPC)."""
+    max_conn = str(_parse_positive_int("ARIA2_MAX_CONNECTION_PER_SERVER", 64))
+    split = str(_parse_positive_int("ARIA2_SPLIT", 64))
+    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "1M").strip() or "1M"
+    ul = aria2_upload_limit_string()
+    return {
+        "max-connection-per-server": max_conn,
+        "split": split,
+        "min-split-size": min_split,
+        "max-upload-limit": ul,
+    }
+
+
 def _aria2_throughput_args() -> list[str]:
     """
     Defaults favor a fast VPS link; BitTorrent throughput still depends on swarm/peers.
@@ -54,6 +81,7 @@ def _aria2_throughput_args() -> list[str]:
     bt_peers = _parse_positive_int("ARIA2_BT_MAX_PEERS", 300)
     bt_open = _parse_positive_int("ARIA2_BT_MAX_OPEN_FILES", 1000)
     disk_raw = (os.environ.get("ARIA2_DISK_CACHE") or "256M").strip()
+    upl = aria2_upload_limit_string()
 
     out = [
         f"--max-connection-per-server={max_conn}",
@@ -64,7 +92,8 @@ def _aria2_throughput_args() -> list[str]:
         "--bt-request-peer-speed-limit=0",
         "--max-overall-download-limit=0",
         "--max-download-limit=0",
-        "--max-overall-upload-limit=0",
+        f"--max-overall-upload-limit={upl}",
+        f"--max-upload-limit={upl}",
     ]
     if disk_raw.lower() not in ("", "0", "none", "off"):
         out.append(f"--disk-cache={disk_raw}")
@@ -134,6 +163,7 @@ class Aria2Service:
         self._pid_file = self.state_dir / "aria2.pid"
         self._daemon_proc: subprocess.Popen[str] | None = None
         self._start_lock = threading.Lock()
+        self._upload_limit_sync_ts: float | None = None
 
     def rpc_url(self) -> str:
         port = self.rpc_port if self.rpc_port else int(os.environ.get("ARIA2_RPC_PORT", "6800"))
@@ -185,9 +215,47 @@ class Aria2Service:
         except Aria2RPCError:
             return False
 
+    def _sync_upload_limits_to_daemon(self) -> None:
+        """
+        Push max-upload-limit / max-overall-upload-limit over RPC.
+
+        When the daemon was started by an older app version, it may still have
+        aria2's default (0 = unlimited). This runs periodically so env changes
+        apply without manually killing aria2c.
+        """
+        now = time.time()
+        if self._upload_limit_sync_ts is not None and now - self._upload_limit_sync_ts < 15.0:
+            return
+        self._upload_limit_sync_ts = now
+        ul = aria2_upload_limit_string()
+        gopts = {"max-overall-upload-limit": ul, "max-upload-limit": ul}
+        try:
+            self.call("aria2.changeGlobalOption", [gopts])
+        except Aria2RPCError as e:
+            logger.warning("aria2.changeGlobalOption upload limits: %s", e)
+            return
+        try:
+            active = self.call("aria2.tellActive", [])
+        except Aria2RPCError as e:
+            logger.warning("aria2.tellActive during upload limit sync: %s", e)
+            return
+        if not isinstance(active, list):
+            return
+        for row in active:
+            if not isinstance(row, dict):
+                continue
+            gid = row.get("gid")
+            if not gid:
+                continue
+            try:
+                self.call("aria2.changeOption", [gid, {"max-upload-limit": ul}])
+            except Aria2RPCError as e:
+                logger.debug("aria2.changeOption max-upload-limit %s: %s", gid, e)
+
     def ensure_daemon(self) -> None:
         with self._start_lock:
             if self.ping():
+                self._sync_upload_limits_to_daemon()
                 return
             aria2 = _which_aria2()
             if not aria2:
@@ -247,6 +315,7 @@ class Aria2Service:
             while time.time() < deadline:
                 if self.ping():
                     logger.info("aria2 daemon ready on port %s", self.rpc_port)
+                    self._sync_upload_limits_to_daemon()
                     return
                 time.sleep(0.2)
 

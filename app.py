@@ -8,6 +8,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import mimetypes
 import os
 import secrets
 import shutil
@@ -15,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,7 +31,6 @@ from flask import (
     redirect,
     render_template,
     request,
-    send_file,
     session,
     url_for,
 )
@@ -39,6 +40,7 @@ from werkzeug.security import check_password_hash
 
 from aria2_service import (
     Aria2RPCError,
+    aria2_throughput_rpc_options,
     fetch_all_downloads,
     fetch_download_detail,
     get_service,
@@ -46,6 +48,7 @@ from aria2_service import (
 )
 from magnet_util import auto_subfolder_name, parse_magnet, pick_unique_dir
 from pathutil import safe_under_root
+from range_file_serve import range_file_download_response
 from zip_jobs_store import ZipJobsStore
 
 try:
@@ -229,6 +232,31 @@ def _verify_files_download_token(rel_path: str, token: str) -> bool:
         return str(data.get("path") or "") == rel_path
     except (BadSignature, SignatureExpired):
         return False
+
+
+def _verify_zip_download_token(job_id: str, token: str) -> bool:
+    secret = (os.environ.get("FILES_DOWNLOAD_TOKEN_SECRET") or "").strip()
+    if not secret:
+        return False
+    ser = URLSafeTimedSerializer(secret, salt="weedr-zip-v1")
+    try:
+        max_age = int(os.environ.get("FILES_DOWNLOAD_TOKEN_MAX_AGE", str(7 * 86400)))
+        data = ser.loads(token, max_age=max_age)
+        return str(data.get("job_id") or "") == job_id
+    except (BadSignature, SignatureExpired):
+        return False
+
+
+def _files_anonymous_downloads_ok() -> bool:
+    return os.environ.get("FILES_DOWNLOAD_ANONYMOUS", "").lower() in ("1", "true", "yes")
+
+
+def _mint_zip_download_token(job_id: str) -> str | None:
+    secret = (os.environ.get("FILES_DOWNLOAD_TOKEN_SECRET") or "").strip()
+    if not secret:
+        return None
+    ser = URLSafeTimedSerializer(secret, salt="weedr-zip-v1")
+    return ser.dumps({"job_id": job_id})
 
 
 def _http_download_validators(full: Path) -> tuple[str, datetime]:
@@ -756,18 +784,31 @@ def create_app() -> Flask:
                     )
                 except OSError:
                     size, mtime = None, ""
-                out.append(
-                    {
+                row: dict[str, Any] = {
                         "name": p.name,
                         "rel_path": rel_path,
                         "is_dir": p.is_dir(),
                         "size": size,
                         "mtime": mtime,
                     }
-                )
+                if not p.is_dir():
+                    fsecret = (os.environ.get("FILES_DOWNLOAD_TOKEN_SECRET") or "").strip()
+                    if fsecret:
+                        ser = URLSafeTimedSerializer(fsecret, salt="weedr-files-v1")
+                        row["download_url"] = url_for(
+                            "download_file", rel_path=rel_path, token=ser.dumps({"path": rel_path})
+                        )
+                out.append(row)
         except OSError:
             pass
         return out
+
+    def zip_download_public_url(job_id: str) -> str:
+        base = url_for("api_fs_zip_download", job_id=job_id)
+        tok = _mint_zip_download_token(job_id)
+        if tok:
+            return base + "?" + urlencode({"token": tok})
+        return base
 
     def _auth_json():
         if not require_auth():
@@ -804,6 +845,7 @@ def create_app() -> Flask:
             "dir": str(final_dir),
             "seed-time": os.environ.get("ARIA2_SEED_TIME", "0"),
             "seed-ratio": os.environ.get("ARIA2_SEED_RATIO", "0"),
+            **aria2_throughput_rpc_options(),
         }
 
         try:
@@ -1165,7 +1207,7 @@ def create_app() -> Flask:
             out["processed_human"] = _human_bytes(int(out.get("processed_bytes") or 0))
             out["total_human"] = _human_bytes(int(out.get("total_bytes") or 0))
             if out.get("status") == "done":
-                out["download_url"] = url_for("api_fs_zip_download", job_id=job_id)
+                out["download_url"] = zip_download_public_url(job_id)
             return jsonify(out)
         if _zip_blob_path(job_id).is_file():
             meta = _read_zip_meta(job_id)
@@ -1175,7 +1217,7 @@ def create_app() -> Flask:
                     "job_id": job_id,
                     "status": "done",
                     "progress": 100.0,
-                    "download_url": url_for("api_fs_zip_download", job_id=job_id),
+                    "download_url": zip_download_public_url(job_id),
                     "rel_path": meta.get("rel_path", ""),
                     "download_name": meta.get("download_name", "download.zip"),
                     "zip_size_bytes": sz,
@@ -1215,7 +1257,7 @@ def create_app() -> Flask:
                     "status": "done",
                     "job_id": jid,
                     "progress": 100.0,
-                    "download_url": url_for("api_fs_zip_download", job_id=jid),
+                    "download_url": zip_download_public_url(jid),
                     "download_name": meta.get("download_name") or "download.zip",
                     "rel_path": rel,
                 }
@@ -1257,7 +1299,7 @@ def create_app() -> Flask:
                 "orphan": False,
             }
             if j.get("status") == "done" and zp.is_file():
-                row["download_url"] = url_for("api_fs_zip_download", job_id=jid)
+                row["download_url"] = zip_download_public_url(jid)
             elif j.get("status") == "done":
                 row["download_url"] = None
             else:
@@ -1301,7 +1343,7 @@ def create_app() -> Flask:
                         "started": None,
                         "finished": meta.get("finished"),
                         "orphan": True,
-                        "download_url": url_for("api_fs_zip_download", job_id=jid),
+                        "download_url": zip_download_public_url(jid),
                         "zip_size_bytes": sz,
                         "zip_size_human": _human_bytes(sz),
                         "sort_ts": ts,
@@ -1352,31 +1394,66 @@ def create_app() -> Flask:
         _notify_webhook("zip_deleted", {"job_id": job_id})
         return jsonify({"ok": True})
 
-    @app.route("/api/fs/zip/download/<job_id>")
+    @app.route("/api/fs/zip/download/<job_id>", methods=["GET", "HEAD"])
     @limiter.limit("120 per minute")
     def api_fs_zip_download(job_id: str):
         """Download a finished zip from persistent ZIP_STORAGE_DIR (not a temp file)."""
-        if not require_auth():
-            abort(401)
         job_id = job_id.strip()
         if not job_id or len(job_id) > 48:
             abort(400)
+        tok = request.args.get("token")
+        token_ok = bool(tok and _verify_zip_download_token(job_id, tok))
+        anon = _files_anonymous_downloads_ok()
+        if not token_ok and not require_auth() and not anon:
+            abort(401)
         zp = _zip_blob_path(job_id)
         if not zp.is_file():
             abort(404)
         meta = _read_zip_meta(job_id)
-        download_name = meta.get("download_name") or f"{job_id}.zip"
-        resp = send_file(
+        download_name = str(meta.get("download_name") or f"{job_id}.zip")
+        etag_val, lm_anchor = _http_download_validators(zp)
+
+        conn_id: str | None = None
+        if request.method == "GET":
+            client_ip = get_client_ip()
+            range_hdr = request.headers.get("Range") or ""
+            ua = (request.headers.get("User-Agent") or "")[:450]
+            conn_id = secrets.token_hex(10)
+            norm_path = f"_zip/{job_id}.zip"
+            entry = {
+                "id": conn_id,
+                "path": norm_path,
+                "filename": download_name,
+                "ip": client_ip,
+                "user_agent": ua,
+                "range_request": bool(range_hdr),
+                "range_preview": range_hdr[:100],
+                "since": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            }
+            with _file_download_lock:
+                _active_http_downloads[conn_id] = entry
+
+        resp = range_file_download_response(
             zp,
-            as_attachment=True,
-            download_name=str(download_name),
+            download_name=download_name,
             mimetype="application/zip",
-            max_age=0,
+            etag=etag_val,
+            last_modified=lm_anchor,
+            method=request.method,
+            range_header=request.headers.get("Range"),
+            if_range_header=request.headers.get("If-Range"),
         )
-        resp.headers["Cache-Control"] = "private, no-store"
+
+        if conn_id is not None:
+
+            def _release_http_download() -> None:
+                with _file_download_lock:
+                    _active_http_downloads.pop(conn_id, None)
+
+            resp.call_on_close(_release_http_download)
         return resp
 
-    @app.route("/files/<path:rel_path>")
+    @app.route("/files/<path:rel_path>", methods=["GET", "HEAD"])
     def download_file(rel_path: str):
         norm_rel = rel_path.replace("\\", "/")
         tok = request.args.get("token")
@@ -1384,7 +1461,8 @@ def create_app() -> Flask:
             tok
             and _verify_files_download_token(norm_rel, tok)
         )
-        if not token_ok and not require_auth():
+        anon = _files_anonymous_downloads_ok()
+        if not token_ok and not require_auth() and not anon:
             abort(401)
         if ".." in rel_path.split("/"):
             abort(400)
@@ -1392,42 +1470,47 @@ def create_app() -> Flask:
         if full is None or not full.is_file():
             abort(404)
 
-        client_ip = get_client_ip()
+        conn_id: str | None = None
+        if request.method == "GET":
+            client_ip = get_client_ip()
+            range_hdr = request.headers.get("Range") or ""
+            ua = (request.headers.get("User-Agent") or "")[:450]
+            conn_id = secrets.token_hex(10)
+            norm_path = rel_path.replace("\\", "/")
+            entry = {
+                "id": conn_id,
+                "path": norm_path,
+                "filename": full.name,
+                "ip": client_ip,
+                "user_agent": ua,
+                "range_request": bool(range_hdr),
+                "range_preview": range_hdr[:100],
+                "since": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            }
+            with _file_download_lock:
+                _active_http_downloads[conn_id] = entry
 
-        range_hdr = request.headers.get("Range") or ""
-        ua = (request.headers.get("User-Agent") or "")[:450]
-        conn_id = secrets.token_hex(10)
-        norm_path = rel_path.replace("\\", "/")
-        entry = {
-            "id": conn_id,
-            "path": norm_path,
-            "filename": full.name,
-            "ip": client_ip,
-            "user_agent": ua,
-            "range_request": bool(range_hdr),
-            "range_preview": range_hdr[:100],
-            "since": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-        }
-        with _file_download_lock:
-            _active_http_downloads[conn_id] = entry
-
-        # conditional=True enables HTTP Range (206) + Accept-Ranges — required for IDM/FDM multi-connection segmented downloads
         etag_val, lm_anchor = _http_download_validators(full)
-        resp = send_file(
+        guessed, _ = mimetypes.guess_type(full.name)
+        mimetype = guessed or "application/octet-stream"
+        resp = range_file_download_response(
             full,
-            as_attachment=True,
             download_name=full.name,
-            conditional=True,
+            mimetype=mimetype,
             etag=etag_val,
             last_modified=lm_anchor,
+            method=request.method,
+            range_header=request.headers.get("Range"),
+            if_range_header=request.headers.get("If-Range"),
         )
-        resp.headers["Cache-Control"] = "private, no-store"
 
-        def _release_http_download() -> None:
-            with _file_download_lock:
-                _active_http_downloads.pop(conn_id, None)
+        if conn_id is not None:
 
-        resp.call_on_close(_release_http_download)
+            def _release_http_download() -> None:
+                with _file_download_lock:
+                    _active_http_downloads.pop(conn_id, None)
+
+            resp.call_on_close(_release_http_download)
         return resp
 
     def _rss_worker_loop() -> None:

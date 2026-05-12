@@ -183,6 +183,8 @@ echo "Starting download to: $DOWNLOAD_DIR"
     --no-conf=true \
     --dir="$DOWNLOAD_DIR" \
     --seed-time=0 \
+    --max-overall-upload-limit=1K \
+    --max-upload-limit=1K \
     --bt-save-metadata=true \
     --bt-tracker="$PUBLIC_TRACKERS" \
     --enable-dht=true \
