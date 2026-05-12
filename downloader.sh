@@ -15,7 +15,13 @@ ARIA2_TMP_ROOT="/tmp/aria2-installer"
 ARIA2_STATE_DIR="$HOME/.cache/aria2"
 ARIA2_DHT_FILE="$ARIA2_STATE_DIR/dht.dat"
 ARIA2_DHT6_FILE="$ARIA2_STATE_DIR/dht6.dat"
-PUBLIC_TRACKERS="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce,udp://exodus.desync.com:6969/announce,udp://tracker.openbittorrent.com:6969/announce,udp://tracker.internetwarriors.net:1337/announce"
+TRACKERS_BEST_URL="https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"
+# Baked trackers_best (ngosang/trackerslist); used if curl fetch fails.
+_PUBLIC_TRACKERS_FALLBACK="udp://tracker.opentrackr.org:1337/announce,udp://open.demonii.com:1337/announce,udp://open.stealth.si:80/announce,udp://wepzone.net:6969/announce,udp://vito-tracker.space:6969/announce,udp://vito-tracker.duckdns.org:6969/announce,udp://udp.tracker.projectk.org:23333/announce,udp://tracker.tryhackx.org:6969/announce,udp://tracker.torrent.eu.org:451/announce,udp://tracker.theoks.net:6969/announce,udp://tracker.t-1.org:6969/announce,udp://tracker.srv00.com:6969/announce,udp://tracker.qu.ax:6969/announce,udp://tracker.plx.im:6969/announce,udp://tracker.opentorrent.top:6969/announce,udp://tracker.gmi.gd:6969/announce,udp://tracker.fnix.net:6969/announce,udp://tracker.flatuslifir.is:6969/announce,udp://tracker.filemail.com:6969/announce,udp://tracker.ducks.party:1984/announce"
+if command -v curl &>/dev/null; then
+  PUBLIC_TRACKERS="$(curl -fsSL --max-time 12 "$TRACKERS_BEST_URL" 2>/dev/null | sed '/^#/d;/^$/d' | awk 'NR>1{printf ","}{printf "%s",$0} END{print ""}')" || true
+fi
+PUBLIC_TRACKERS="${PUBLIC_TRACKERS:-$_PUBLIC_TRACKERS_FALLBACK}"
 
 # ---------- Helpers ----------
 die() {
@@ -183,18 +189,26 @@ echo "Starting download to: $DOWNLOAD_DIR"
     --no-conf=true \
     --dir="$DOWNLOAD_DIR" \
     --seed-time=0 \
-    --max-overall-upload-limit=1K \
-    --max-upload-limit=1K \
+    --max-overall-download-limit=0 \
+    --max-download-limit=0 \
+    --max-overall-upload-limit=0 \
+    --max-upload-limit=0 \
+    --file-allocation=none \
+    --disk-cache=128M \
     --bt-save-metadata=true \
     --bt-tracker="$PUBLIC_TRACKERS" \
     --enable-dht=true \
     --enable-dht6=true \
+    --bt-enable-lpd=true \
+    --dht-listen-port=6881-6999 \
+    --bt-max-peers=100 \
+    --bt-force-encryption=true \
     --dht-file-path="$ARIA2_DHT_FILE" \
     --dht-file-path6="$ARIA2_DHT6_FILE" \
     --follow-torrent=mem \
     --max-connection-per-server=16 \
-    --split=16 \
-    --min-split-size=1M \
+    --split=64 \
+    --min-split-size=10M \
     "$MAGNET_URL"
 
 # ---------- Report ----------

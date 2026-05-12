@@ -22,14 +22,68 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TRACKERS = (
-    "udp://tracker.opentrackr.org:1337/announce,"
-    "udp://open.stealth.si:80/announce,"
-    "udp://tracker.torrent.eu.org:451/announce,"
-    "udp://exodus.desync.com:6969/announce,"
-    "udp://tracker.openbittorrent.com:6969/announce,"
-    "udp://tracker.internetwarriors.net:1337/announce"
+# Upstream: https://github.com/ngosang/trackerslist/blob/master/trackers_best.txt
+_TRACKERS_BEST_URL = (
+    "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"
 )
+
+# Baked copy of trackers_best (used if fetch fails). Refresh periodically from upstream.
+_DEFAULT_TRACKERS_BAKED = ",".join(
+    [
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.demonii.com:1337/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://wepzone.net:6969/announce",
+        "udp://vito-tracker.space:6969/announce",
+        "udp://vito-tracker.duckdns.org:6969/announce",
+        "udp://udp.tracker.projectk.org:23333/announce",
+        "udp://tracker.tryhackx.org:6969/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://tracker.theoks.net:6969/announce",
+        "udp://tracker.t-1.org:6969/announce",
+        "udp://tracker.srv00.com:6969/announce",
+        "udp://tracker.qu.ax:6969/announce",
+        "udp://tracker.plx.im:6969/announce",
+        "udp://tracker.opentorrent.top:6969/announce",
+        "udp://tracker.gmi.gd:6969/announce",
+        "udp://tracker.fnix.net:6969/announce",
+        "udp://tracker.flatuslifir.is:6969/announce",
+        "udp://tracker.filemail.com:6969/announce",
+        "udp://tracker.ducks.party:1984/announce",
+    ]
+)
+
+_default_trackers_memo: str | None = None
+_trackers_fetch_lock = threading.Lock()
+
+# Backwards-compatible name: same as baked fallback (see default_bt_trackers()).
+DEFAULT_TRACKERS = _DEFAULT_TRACKERS_BAKED
+
+
+def default_bt_trackers() -> str:
+    """Comma-separated trackers_best list; fetch once per process, fallback if offline."""
+    global _default_trackers_memo
+    with _trackers_fetch_lock:
+        if _default_trackers_memo is not None:
+            return _default_trackers_memo
+        try:
+            req = Request(
+                _TRACKERS_BEST_URL,
+                headers={"User-Agent": "torrent-server (trackerslist consumer)"},
+                method="GET",
+            )
+            with urlopen(req, timeout=10) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+            lines = [
+                ln.strip()
+                for ln in text.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")
+            ]
+            _default_trackers_memo = ",".join(lines) if lines else _DEFAULT_TRACKERS_BAKED
+        except (OSError, HTTPError, URLError, ValueError) as e:
+            logger.warning("trackers_best fetch failed, using baked list: %s", e)
+            _default_trackers_memo = _DEFAULT_TRACKERS_BAKED
+        return _default_trackers_memo
 
 
 def _parse_positive_int(name: str, default: int) -> int:
@@ -43,45 +97,69 @@ def _parse_positive_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return default
+
+
 def aria2_upload_limit_string() -> str:
-    """
-    aria2 treats upload limit 0 as *unlimited*. Default to a small cap so
-    "minimal upload" is the out-of-the-box behavior (tunable via env).
-    """
+    """Upload cap for aria2 (0 = unlimited)."""
     raw = (
         os.environ.get("ARIA2_MAX_UPLOAD_LIMIT")
         or os.environ.get("ARIA2_MAX_OVERALL_UPLOAD_LIMIT")
-        or "1K"
+        or "0"
     ).strip()
-    return raw or "1K"
+    return raw if raw else "0"
+
+
+def aria2_download_limit_string() -> str:
+    """Download cap for aria2 (0 = unlimited)."""
+    raw = (os.environ.get("ARIA2_MAX_DOWNLOAD_LIMIT") or "0").strip()
+    return raw if raw else "0"
 
 
 def aria2_throughput_rpc_options() -> dict[str, str]:
     """Per-download options for aria2.addUri (string values per RPC)."""
-    max_conn = str(_parse_positive_int("ARIA2_MAX_CONNECTION_PER_SERVER", 64))
+    max_conn = str(_parse_positive_int("ARIA2_MAX_CONNECTION_PER_SERVER", 16))
     split = str(_parse_positive_int("ARIA2_SPLIT", 64))
-    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "1M").strip() or "1M"
+    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "10M").strip() or "10M"
     ul = aria2_upload_limit_string()
+    dl = aria2_download_limit_string()
     return {
         "max-connection-per-server": max_conn,
         "split": split,
         "min-split-size": min_split,
         "max-upload-limit": ul,
+        "max-download-limit": dl,
     }
+
+
+def _aria2_file_allocation_arg() -> str:
+    fa = (os.environ.get("ARIA2_FILE_ALLOCATION") or "none").strip().lower()
+    if fa not in ("none", "prealloc", "trunc", "falloc"):
+        fa = "none"
+    return f"--file-allocation={fa}"
 
 
 def _aria2_throughput_args() -> list[str]:
     """
-    Defaults favor a fast VPS link; BitTorrent throughput still depends on swarm/peers.
-    Override via env — restart aria2 (and usually pm2) after changes.
+    Defaults match common home/VPS BitTorrent tuning; override via env.
+    Restart aria2 after changes.
     """
-    max_conn = _parse_positive_int("ARIA2_MAX_CONNECTION_PER_SERVER", 64)
+    max_conn = _parse_positive_int("ARIA2_MAX_CONNECTION_PER_SERVER", 16)
     split = _parse_positive_int("ARIA2_SPLIT", 64)
-    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "1M").strip() or "1M"
-    bt_peers = _parse_positive_int("ARIA2_BT_MAX_PEERS", 300)
+    min_split = (os.environ.get("ARIA2_MIN_SPLIT_SIZE") or "10M").strip() or "10M"
+    bt_peers = _parse_positive_int("ARIA2_BT_MAX_PEERS", 100)
     bt_open = _parse_positive_int("ARIA2_BT_MAX_OPEN_FILES", 1000)
-    disk_raw = (os.environ.get("ARIA2_DISK_CACHE") or "256M").strip()
+    disk_raw = (os.environ.get("ARIA2_DISK_CACHE") or "128M").strip()
     upl = aria2_upload_limit_string()
+    dl = aria2_download_limit_string()
 
     out = [
         f"--max-connection-per-server={max_conn}",
@@ -90,14 +168,25 @@ def _aria2_throughput_args() -> list[str]:
         f"--bt-max-peers={bt_peers}",
         f"--bt-max-open-files={bt_open}",
         "--bt-request-peer-speed-limit=0",
-        "--max-overall-download-limit=0",
-        "--max-download-limit=0",
+        f"--max-overall-download-limit={dl}",
+        f"--max-download-limit={dl}",
         f"--max-overall-upload-limit={upl}",
         f"--max-upload-limit={upl}",
     ]
     if disk_raw.lower() not in ("", "0", "none", "off"):
         out.append(f"--disk-cache={disk_raw}")
     return out
+
+
+def _aria2_bt_daemon_flags() -> list[str]:
+    """DHT/LPD and encryption flags for the managed daemon."""
+    dht_port = (os.environ.get("ARIA2_DHT_LISTEN_PORT") or "6881-6999").strip() or "6881-6999"
+    flags: list[str] = [
+        f"--dht-listen-port={dht_port}",
+        f"--bt-enable-lpd={str(_env_bool('ARIA2_BT_ENABLE_LPD', True)).lower()}",
+        f"--bt-force-encryption={str(_env_bool('ARIA2_BT_FORCE_ENCRYPTION', True)).lower()}",
+    ]
+    return flags
 
 
 class Aria2RPCError(RuntimeError):
@@ -157,7 +246,7 @@ class Aria2Service:
         self.rpc_port = rpc_port or int(os.environ.get("ARIA2_RPC_PORT", "0")) or 0
         self._rpc_secret_override = rpc_secret
         self.max_concurrent_downloads = max_concurrent_downloads or int(
-            os.environ.get("ARIA2_MAX_CONCURRENT", "8")
+            os.environ.get("ARIA2_MAX_CONCURRENT", "5")
         )
         self._secret_file = self.state_dir / "aria2.rpc.secret"
         self._pid_file = self.state_dir / "aria2.pid"
@@ -217,22 +306,28 @@ class Aria2Service:
 
     def _sync_upload_limits_to_daemon(self) -> None:
         """
-        Push max-upload-limit / max-overall-upload-limit over RPC.
+        Push global download/upload caps and per-active-GID limits over RPC.
 
-        When the daemon was started by an older app version, it may still have
-        aria2's default (0 = unlimited). This runs periodically so env changes
-        apply without manually killing aria2c.
+        When the daemon was started by an older app version, options may not
+        match current env; this runs periodically so changes apply without
+        manually killing aria2c.
         """
         now = time.time()
         if self._upload_limit_sync_ts is not None and now - self._upload_limit_sync_ts < 15.0:
             return
         self._upload_limit_sync_ts = now
         ul = aria2_upload_limit_string()
-        gopts = {"max-overall-upload-limit": ul, "max-upload-limit": ul}
+        dl = aria2_download_limit_string()
+        gopts = {
+            "max-overall-upload-limit": ul,
+            "max-upload-limit": ul,
+            "max-overall-download-limit": dl,
+            "max-download-limit": dl,
+        }
         try:
             self.call("aria2.changeGlobalOption", [gopts])
         except Aria2RPCError as e:
-            logger.warning("aria2.changeGlobalOption upload limits: %s", e)
+            logger.warning("aria2.changeGlobalOption speed limits: %s", e)
             return
         try:
             active = self.call("aria2.tellActive", [])
@@ -248,9 +343,12 @@ class Aria2Service:
             if not gid:
                 continue
             try:
-                self.call("aria2.changeOption", [gid, {"max-upload-limit": ul}])
+                self.call(
+                    "aria2.changeOption",
+                    [gid, {"max-upload-limit": ul, "max-download-limit": dl}],
+                )
             except Aria2RPCError as e:
-                logger.debug("aria2.changeOption max-upload-limit %s: %s", gid, e)
+                logger.debug("aria2.changeOption speed limits %s: %s", gid, e)
 
     def ensure_daemon(self) -> None:
         with self._start_lock:
@@ -273,7 +371,7 @@ class Aria2Service:
 
             dht = self.state_dir / "dht.dat"
             dht6 = self.state_dir / "dht6.dat"
-            trackers = os.environ.get("ARIA2_BT_TRACKERS", DEFAULT_TRACKERS)
+            trackers = (os.environ.get("ARIA2_BT_TRACKERS") or "").strip() or default_bt_trackers()
             seed_time = os.environ.get("ARIA2_SEED_TIME", "0")
             # 0 disables ratio-based seed stop; use with seed-time=0 so nothing seeds after complete.
             seed_ratio = os.environ.get("ARIA2_SEED_RATIO", "0")
@@ -290,7 +388,7 @@ class Aria2Service:
                 "--disable-ipv6=false",
                 f"--dir={self.download_dir}",
                 "--continue=true",
-                "--file-allocation=falloc",
+                _aria2_file_allocation_arg(),
                 f"--seed-time={seed_time}",
                 f"--seed-ratio={seed_ratio}",
                 "--bt-save-metadata=true",
@@ -300,6 +398,7 @@ class Aria2Service:
                 f"--dht-file-path={dht}",
                 f"--dht-file-path6={dht6}",
                 "--follow-torrent=mem",
+                *_aria2_bt_daemon_flags(),
                 *_aria2_throughput_args(),
                 f"--max-concurrent-downloads={self.max_concurrent_downloads}",
                 "--save-session-interval=30",
