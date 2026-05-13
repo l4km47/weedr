@@ -71,12 +71,15 @@ PORT=8000
 FLASK_DEBUG=0
 SESSION_COOKIE_SECURE=0
 SESSION_HOURS=10
-ARIA2_MAX_CONCURRENT=5
-ARIA2_MAX_CONNECTION_PER_SERVER=64
-ARIA2_SPLIT=16
-ARIA2_MIN_SPLIT_SIZE=1M
-ARIA2_BT_MAX_PEERS=100
-ARIA2_DISK_CACHE=64M
+
+# --- aria2 tuning (optimised for 10 Gbps) ---
+ARIA2_MAX_CONCURRENT=20
+ARIA2_MAX_CONNECTION_PER_SERVER=16
+ARIA2_SPLIT=128
+ARIA2_MIN_SPLIT_SIZE=512K
+ARIA2_BT_MAX_PEERS=500
+ARIA2_BT_MAX_OPEN_FILES=1000
+ARIA2_DISK_CACHE=2G
 ARIA2_FILE_ALLOCATION=falloc
 ARIA2_BT_ENABLE_LPD=1
 ARIA2_LISTEN_PORT=6881-6999
@@ -86,6 +89,11 @@ ARIA2_MAX_UPLOAD_LIMIT=0
 ARIA2_MAX_DOWNLOAD_LIMIT=0
 ARIA2_SEED_TIME=0
 ARIA2_SEED_RATIO=0
+ARIA2_OPTIMIZE_CONCURRENT_DOWNLOADS=true
+ARIA2_BT_REQUEST_PEER_SPEED_LIMIT=100M
+ARIA2_PIECE_LENGTH=8M
+ARIA2_ASYNC_DNS=true
+ARIA2_ASYNC_DNS_SERVER=1.1.1.1,8.8.8.8
 RATELIMIT_STORAGE_URI=memory://
 
 # --- Optional (defaults shown; uncomment to enable / override) ---
@@ -133,6 +141,27 @@ else
     echo "ARIA2_SEED_RATIO=0" >> "$ENV_FILE"
     info "appended ARIA2_SEED_RATIO=0"
   fi
+  # --- 10G tuning: append missing high-throughput knobs --------------------
+  declare -A NEW_VARS=(
+    [ARIA2_MAX_CONCURRENT]=20
+    [ARIA2_MAX_CONNECTION_PER_SERVER]=16
+    [ARIA2_SPLIT]=128
+    [ARIA2_MIN_SPLIT_SIZE]=512K
+    [ARIA2_BT_MAX_PEERS]=500
+    [ARIA2_BT_MAX_OPEN_FILES]=1000
+    [ARIA2_DISK_CACHE]=2G
+    [ARIA2_OPTIMIZE_CONCURRENT_DOWNLOADS]=true
+    [ARIA2_BT_REQUEST_PEER_SPEED_LIMIT]=100M
+    [ARIA2_PIECE_LENGTH]=8M
+    [ARIA2_ASYNC_DNS]=true
+    [ARIA2_ASYNC_DNS_SERVER]="1.1.1.1,8.8.8.8"
+  )
+  for KEY in "${!NEW_VARS[@]}"; do
+    if ! grep -q "^${KEY}=" "$ENV_FILE"; then
+      echo "${KEY}=${NEW_VARS[$KEY]}" >> "$ENV_FILE"
+      info "appended ${KEY}=${NEW_VARS[$KEY]}"
+    fi
+  done
   if ! grep -q '^# --- torrent-server optional vars' "$ENV_FILE"; then
     cat >> "$ENV_FILE" <<'OPTIONAL_EOF'
 
@@ -175,6 +204,16 @@ if [[ "$NEW_ENV" -eq 1 ]]; then
   echo "================================================================"
   echo ""
 fi
+
+# --- OS-level network/fd tuning reminder ----------------------------------
+info "NOTE: For sustained 10G throughput, ensure these sysctl values are set:"
+info "  net.core.rmem_max=536870912"
+info "  net.core.wmem_max=536870912"
+info "  net.ipv4.tcp_rmem='4096 87380 536870912'"
+info "  net.ipv4.tcp_wmem='4096 65536 536870912'"
+info "  net.core.netdev_max_backlog=30000"
+info "  and ulimit -n 1048576 for the process user."
+info "  Add to /etc/sysctl.conf + run: sudo sysctl -p"
 
 # --- PM2 ------------------------------------------------------------------
 if ! command -v pm2 >/dev/null 2>&1; then
