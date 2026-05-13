@@ -295,14 +295,14 @@ if ! command -v pm2 >/dev/null 2>&1; then
   die "pm2 not found. Install Node.js then: npm install -g pm2"
 fi
 
-pm2 delete torrent-server >/dev/null 2>&1 || true
+pm2 delete weedr >/dev/null 2>&1 || true
 pm2 start "$ROOT/run.sh" --name weedr --time --interpreter bash
 pm2 save
 
 LISTEN_HOST="$(grep -E '^HOST=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || echo 0.0.0.0)"
 LISTEN_PORT="$(grep -E '^PORT=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || echo 8000)"
-info "PM2 app 'torrent-server' started — http://${LISTEN_HOST}:${LISTEN_PORT}"
-info "Logs: pm2 logs torrent-server   Restart: pm2 restart torrent-server"
+info "PM2 app 'weedr' started — http://${LISTEN_HOST}:${LISTEN_PORT}"
+info "Logs: pm2 logs weedr   Restart: pm2 restart weedr"
 if ! pm2 startup >/dev/null 2>&1; then
   info "Optional: run \`pm2 startup\` (as root) so the app restarts after reboot."
 fi
