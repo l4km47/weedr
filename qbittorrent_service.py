@@ -77,6 +77,30 @@ def _env_int_allow_neg1(name: str, default: int) -> int:
     return n if n > 0 else default
 
 
+def _no_seeding_share_limit_action() -> str:
+    """qBittorrent Web API enum: Stop | Remove | … (see WebAPI_Changelog 2.12.0)."""
+    act = _env_int("QBITTORRENT_RATIO_LIMIT_ACTION", 0, min_ok=0)
+    return "Remove" if act >= 1 else "Stop"
+
+
+def _set_share_limits_payload(
+    *,
+    ratio_limit: str,
+    seeding_time_limit: str,
+    inactive_seeding_time_limit: str,
+    share_limit_action: str,
+    share_limits_mode: str = "MatchAny",
+) -> dict[str, str]:
+    """POST body for /api/v2/torrents/setShareLimits (requires shareLimitAction + shareLimitsMode since API 2.12)."""
+    return {
+        "ratioLimit": ratio_limit,
+        "seedingTimeLimit": seeding_time_limit,
+        "inactiveSeedingTimeLimit": inactive_seeding_time_limit,
+        "shareLimitAction": share_limit_action,
+        "shareLimitsMode": share_limits_mode,
+    }
+
+
 # Human-readable byte rate (e.g. 4M, 1G) -> bytes/sec for qBittorrent limits.
 _RATE_RE = re.compile(
     r"^\s*(\d+(?:\.\d+)?)\s*([kmgt])?(i?b)?(/s)?\s*$",
@@ -510,9 +534,13 @@ class QBittorrentService:
             "api/v2/torrents/setShareLimits",
             {
                 "hashes": h,
-                "ratioLimit": "0",
-                "seedingTimeLimit": "0",
-                "inactiveSeedingTimeLimit": "-1",
+                **_set_share_limits_payload(
+                    ratio_limit="0",
+                    seeding_time_limit="0",
+                    inactive_seeding_time_limit="-1",
+                    share_limit_action=_no_seeding_share_limit_action(),
+                    share_limits_mode="MatchAny",
+                ),
             },
         )
 
@@ -703,9 +731,13 @@ class QBittorrentService:
                 "api/v2/torrents/setShareLimits",
                 {
                     "hashes": h,
-                    "ratioLimit": r_val,
-                    "seedingTimeLimit": t_val,
-                    "inactiveSeedingTimeLimit": str(-1),
+                    **_set_share_limits_payload(
+                        ratio_limit=r_val,
+                        seeding_time_limit=t_val,
+                        inactive_seeding_time_limit=str(-1),
+                        share_limit_action="Default",
+                        share_limits_mode="Default",
+                    ),
                 },
             )
 

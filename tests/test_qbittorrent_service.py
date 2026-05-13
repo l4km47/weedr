@@ -8,6 +8,7 @@ from qbittorrent_service import (
     normalize_qbt_torrent,
     parse_rate_to_bytes_per_sec,
     throughput_preferences_from_env,
+    _set_share_limits_payload,
 )
 
 
@@ -84,6 +85,25 @@ def test_throughput_prefs_allow_seeding_omits_ratio_limit():
     ):
         d = throughput_preferences_from_env()
     assert "max_ratio_enabled" not in d
+
+
+def test_set_share_limits_payload_includes_api212_fields():
+    d = _set_share_limits_payload(
+        ratio_limit="0",
+        seeding_time_limit="0",
+        inactive_seeding_time_limit="-1",
+        share_limit_action="Stop",
+        share_limits_mode="MatchAny",
+    )
+    assert d["shareLimitAction"] == "Stop"
+    assert d["shareLimitsMode"] == "MatchAny"
+    assert set(d.keys()) >= {
+        "ratioLimit",
+        "seedingTimeLimit",
+        "inactiveSeedingTimeLimit",
+        "shareLimitAction",
+        "shareLimitsMode",
+    }
 
 
 def test_throughput_prefs_ratio_limit_action_remove():
