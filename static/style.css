@@ -1490,6 +1490,16 @@ body.theme-light .file-progress-wrap {
   word-break: break-word;
 }
 
+.app-modal-body.app-modal-body--log {
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  max-height: min(52vh, 380px);
+  overflow-y: auto;
+  text-align: left;
+  color: var(--text);
+}
+
 .app-modal-actions {
   display: flex;
   flex-wrap: wrap;

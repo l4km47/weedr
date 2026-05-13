@@ -20,16 +20,21 @@ def test_parse_torrent_metainfo_v1_info_hash():
     p = parse_torrent_metainfo(raw)
     assert p["info_hash_hex"] == want
     assert p["display_name"]
+    assert isinstance(p.get("parse_log"), list)
+    assert len(p["parse_log"]) >= 3
 
 
 def test_parse_torrent_metainfo_rejects_v2_meta_version():
     info = {b"meta version": 2, b"name": b"x", b"piece length": 16384, b"pieces": b"\x00" * 20}
     meta = {b"announce": b"http://127.0.0.1:1/a", b"info": info}
     raw = _bencode_encode(meta)
-    with pytest.raises(TorrentFileError, match="v2"):
+    with pytest.raises(TorrentFileError, match="v2") as exc_info:
         parse_torrent_metainfo(raw)
+    assert exc_info.value.parse_log
+    assert any("v2" in line.lower() or "hybrid" in line.lower() for line in exc_info.value.parse_log)
 
 
 def test_parse_torrent_metainfo_rejects_junk():
-    with pytest.raises(TorrentFileError):
+    with pytest.raises(TorrentFileError) as exc_info:
         parse_torrent_metainfo(b"not a torrent")
+    assert exc_info.value.parse_log

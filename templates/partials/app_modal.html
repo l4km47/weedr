@@ -45,6 +45,7 @@
       appModalResolve = resolve;
       appModalTitle.textContent = opts.title || 'Notice';
       appModalBody.textContent = opts.message || '';
+      appModalBody.className = 'app-modal-body muted' + (opts.bodyClass ? ' ' + opts.bodyClass : '');
       appModalOk.textContent = opts.confirmLabel || 'OK';
       var showCancel = opts.cancelLabel != null && opts.cancelLabel !== '';
       if (appModalCancel) {
@@ -70,19 +71,23 @@
 
   window.weedrModal = {
     _initialized: true,
-    alert: function (message, title) {
+    alert: function (message, title, options) {
+      options = options || {};
       return openAppModal({
         title: title || 'Error',
         message: message || '',
         cancelLabel: null,
+        bodyClass: options.bodyClass || '',
       }).catch(function () {});
     },
-    confirm: function (message, title, confirmLabel, cancelLabel) {
+    confirm: function (message, title, confirmLabel, cancelLabel, options) {
+      options = options || {};
       return openAppModal({
         title: title || 'Confirm',
         message: message || '',
         confirmLabel: confirmLabel || 'OK',
         cancelLabel: cancelLabel != null ? cancelLabel : 'Cancel',
+        bodyClass: options.bodyClass || '',
       });
     },
   };

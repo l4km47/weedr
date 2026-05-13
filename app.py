@@ -893,11 +893,18 @@ def create_app() -> Flask:
         """Parse .torrent (v1 metainfo), pick save folder, add via qBittorrent multipart API."""
         max_b = _torrent_file_max_bytes()
         if len(file_bytes) > max_b:
-            return {"error": f"Torrent file too large (max {max_b} bytes)"}, 400
+            return {
+                "error": f"Torrent file too large (max {max_b} bytes)",
+                "parse_log": [
+                    f"Read {len(file_bytes)} bytes.",
+                    f"Rejected before decode: exceeds configured max ({max_b} bytes).",
+                ],
+            }, 400
         try:
             meta = parse_torrent_metainfo(file_bytes)
         except TorrentFileError as e:
-            return {"error": str(e)}, 400
+            pl = getattr(e, "parse_log", None) or []
+            return {"error": str(e), "parse_log": pl}, 400
         ih = meta["info_hash_hex"]
         display = (meta.get("display_name") or "").strip() or "torrent"
         dn = display if display != "torrent" else None
@@ -928,10 +935,12 @@ def create_app() -> Flask:
             waited = svc.wait_for_torrent(ih, timeout=90.0)
             _after_qbittorrent_add(svc, ih, waited)
         except QBittorrentError as e:
-            return {"error": str(e)}, 503
+            pl = meta.get("parse_log") if isinstance(meta.get("parse_log"), list) else []
+            return {"error": str(e), "parse_log": pl}, 503
 
         rel_dir = str(final_dir.relative_to(DOWNLOAD_DIR)).replace("\\", "/")
-        return {"ok": True, "gid": ih, "save_folder": rel_dir}, 200
+        parse_log = meta.get("parse_log") if isinstance(meta.get("parse_log"), list) else []
+        return {"ok": True, "gid": ih, "save_folder": rel_dir, "parse_log": parse_log}, 200
 
     @app.route("/api/torrents", methods=["GET"])
     @limiter.limit("120 per minute")

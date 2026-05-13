@@ -9,7 +9,11 @@ from werkzeug.utils import secure_filename
 
 
 class TorrentFileError(ValueError):
-    pass
+    """Invalid or unsupported .torrent metainfo; optional parse_log for UI."""
+
+    def __init__(self, message: str, *, parse_log: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.parse_log = list(parse_log or [])
 
 
 def _bencode_decode(data: bytes, i: int = 0) -> tuple[Any, int]:
@@ -90,29 +94,76 @@ def _torrent_display_name(info: dict[bytes, Any]) -> str:
     return "torrent"
 
 
-def parse_torrent_metainfo(data: bytes) -> dict[str, str]:
+def _dict_keys_preview(d: dict[bytes, Any], *, limit: int = 12) -> str:
+    labels = sorted(k.decode("utf-8", "replace") for k in d if isinstance(k, bytes))
+    if len(labels) <= limit:
+        return ", ".join(labels) if labels else "(empty)"
+    return ", ".join(labels[:limit]) + f", … (+{len(labels) - limit} more)"
+
+
+def parse_torrent_metainfo(data: bytes) -> dict[str, Any]:
     """
-    Decode a .torrent file and return v1 info-hash (40 hex) and a folder label.
+    Decode a .torrent file and return v1 info-hash (40 hex), folder label, and parse_log.
     Supports classic v1 metainfo only (no v2-only torrents).
     """
-    if len(data) > 64 * 1024 * 1024:
-        raise TorrentFileError("torrent file too large")
+    log: list[str] = []
+
+    def L(msg: str) -> None:
+        log.append(msg)
+
+    def fail(msg: str) -> TorrentFileError:
+        return TorrentFileError(msg, parse_log=log)
+
+    n = len(data)
+    L(f"Read {n} bytes ({n / 1024.0:.1f} KiB).")
+    if n > 64 * 1024 * 1024:
+        L("Rejected: exceeds parser safety limit (64 MiB).")
+        raise fail("torrent file too large")
     if not data.startswith(b"d"):
-        raise TorrentFileError("not a torrent (expected bencode dict)")
-    meta, end = _bencode_decode(data, 0)
+        L("First byte is not 'd': not a bencode root dictionary.")
+        raise fail("not a torrent (expected bencode dict)")
+    L("Decoding root bencode dictionary…")
+    try:
+        meta, end = _bencode_decode(data, 0)
+    except TorrentFileError as e:
+        L(f"bencode decode error: {e}")
+        raise fail(str(e)) from e
     if end != len(data):
-        raise TorrentFileError("trailing junk after metainfo")
+        L(f"Trailing data after metainfo: {len(data) - end} extra bytes (not allowed).")
+        raise fail("trailing junk after metainfo")
     if not isinstance(meta, dict):
-        raise TorrentFileError("root must be a dict")
+        L(f"Root value type is {type(meta).__name__}, expected dict.")
+        raise fail("root must be a dict")
+    L(f"Root dict has {len(meta)} keys: {_dict_keys_preview(meta)}.")
+    if b"announce" in meta and isinstance(meta[b"announce"], bytes):
+        alen = len(meta[b"announce"])
+        L(f"announce: present ({alen} bytes).")
+    else:
+        L("announce: absent (allowed).")
     info = meta.get(b"info")
     if not isinstance(info, dict):
-        raise TorrentFileError("missing info dict")
+        L("Missing or invalid 'info' key (must be a dict).")
+        raise fail("missing info dict")
+    L(f"info dict has {len(info)} keys: {_dict_keys_preview(info)}.")
     if info.get(b"meta version") == 2 or b"piece layers" in info or meta.get(b"piece layers"):
-        raise TorrentFileError("v2-only / hybrid torrent metainfo is not supported; use a magnet link instead")
+        L("Detected v2 / hybrid markers (meta version, piece layers): not supported here.")
+        raise fail("v2-only / hybrid torrent metainfo is not supported; use a magnet link instead")
+    if isinstance(info.get(b"files"), list):
+        nfiles = len(info[b"files"])
+        L(f"Mode: multi-file torrent ({nfiles} file entries in info.files).")
+    elif b"length" in info:
+        L("Mode: single-file torrent (info.length + info.name).")
+    else:
+        L("Mode: unclear (no info.files list and no info.length).")
     try:
         info_raw = _bencode_encode(info)
     except TorrentFileError as e:
-        raise TorrentFileError(f"cannot encode info: {e}") from e
+        L(f"Could not re-encode info dict for SHA1: {e}")
+        raise fail(f"cannot encode info: {e}") from e
+    L(f"Canonical info dict bencode length: {len(info_raw)} bytes.")
     ih = hashlib.sha1(info_raw).hexdigest()
+    L(f"SHA1(info) → info_hash (v1): {ih}")
     label = _torrent_display_name(info)
-    return {"info_hash_hex": ih, "display_name": label or "torrent"}
+    L(f"Resolved save label / display name: {label!r}")
+    L("Parse finished successfully (v1 metainfo).")
+    return {"info_hash_hex": ih, "display_name": label or "torrent", "parse_log": log}

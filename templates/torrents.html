@@ -671,6 +671,24 @@
     });
   }
 
+  function fmtTorrentFileModalBody(data, isError) {
+    var lines = [];
+    if (isError) {
+      lines.push(data && data.error ? String(data.error) : 'Request failed.');
+    } else {
+      lines.push('Torrent was added to the client.');
+      if (data.gid) lines.push('Info-hash: ' + data.gid);
+      if (data.save_folder) lines.push('Save folder: ' + data.save_folder);
+    }
+    var pl = data && data.parse_log;
+    if (pl && pl.length) {
+      lines.push('');
+      lines.push('--- Parse log ---');
+      for (var i = 0; i < pl.length; i++) lines.push(String(pl[i]));
+    }
+    return lines.join('\n');
+  }
+
   if (torrentFileInput) {
     torrentFileInput.addEventListener('change', async function () {
       var files = torrentFileInput.files;
@@ -695,6 +713,11 @@
           magnetMsg.classList.remove('hidden', 'ok');
           magnetMsg.classList.add('error');
           torrentFileInput.value = '';
+          await window.weedrModal.alert(
+            fmtTorrentFileModalBody(data, true),
+            'Torrent file',
+            { bodyClass: 'app-modal-body--log' }
+          );
           return;
         }
         var extra = data.save_folder ? (' Saved under: ' + data.save_folder + '.') : '';
@@ -702,6 +725,11 @@
         magnetMsg.classList.remove('hidden', 'error');
         magnetMsg.classList.add('ok');
         torrentFileInput.value = '';
+        await window.weedrModal.alert(
+          fmtTorrentFileModalBody(data, false),
+          'Torrent file parsed',
+          { bodyClass: 'app-modal-body--log' }
+        );
         pollTorrents();
       } catch (err) {
         magnetMsg.textContent = 'Could not upload torrent file.';
