@@ -1,0 +1,100 @@
+{# Shared modal for app pages (replaces alert/confirm). Requires layout_app + static/style.css .app-modal rules. #}
+<div id="app-modal" class="app-modal hidden" aria-hidden="true">
+  <div class="app-modal-backdrop" data-app-modal-dismiss tabindex="-1"></div>
+  <div class="app-modal-panel card" role="dialog" aria-modal="true" aria-labelledby="app-modal-title">
+    <h2 id="app-modal-title" class="app-modal-title">—</h2>
+    <p id="app-modal-body" class="app-modal-body muted"></p>
+    <div class="app-modal-actions" id="app-modal-actions">
+      <button type="button" class="btn ghost btn-sm" id="app-modal-cancel">Cancel</button>
+      <button type="button" class="btn primary btn-sm" id="app-modal-ok">OK</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  if (window.weedrModal && window.weedrModal._initialized) return;
+  var appModalRoot = document.getElementById('app-modal');
+  var appModalTitle = document.getElementById('app-modal-title');
+  var appModalBody = document.getElementById('app-modal-body');
+  var appModalOk = document.getElementById('app-modal-ok');
+  var appModalCancel = document.getElementById('app-modal-cancel');
+  var appModalBackdrop = appModalRoot ? appModalRoot.querySelector('[data-app-modal-dismiss]') : null;
+  var appModalResolve = null;
+  var appModalKeyHandler = null;
+
+  function closeAppModal(result) {
+    if (!appModalRoot) return;
+    appModalRoot.classList.add('hidden');
+    appModalRoot.setAttribute('aria-hidden', 'true');
+    if (appModalKeyHandler) {
+      document.removeEventListener('keydown', appModalKeyHandler);
+      appModalKeyHandler = null;
+    }
+    var fn = appModalResolve;
+    appModalResolve = null;
+    if (fn) fn(result);
+  }
+
+  function openAppModal(opts) {
+    opts = opts || {};
+    return new Promise(function (resolve) {
+      if (!appModalRoot || !appModalTitle || !appModalBody || !appModalOk) {
+        resolve(false);
+        return;
+      }
+      appModalResolve = resolve;
+      appModalTitle.textContent = opts.title || 'Notice';
+      appModalBody.textContent = opts.message || '';
+      appModalOk.textContent = opts.confirmLabel || 'OK';
+      var showCancel = opts.cancelLabel != null && opts.cancelLabel !== '';
+      if (appModalCancel) {
+        appModalCancel.classList.toggle('hidden', !showCancel);
+        if (showCancel) appModalCancel.textContent = opts.cancelLabel;
+      }
+      appModalRoot.classList.remove('hidden');
+      appModalRoot.setAttribute('aria-hidden', 'false');
+      appModalKeyHandler = function (ev) {
+        if (ev.key === 'Escape') {
+          ev.preventDefault();
+          closeAppModal(false);
+        }
+      };
+      document.addEventListener('keydown', appModalKeyHandler);
+      setTimeout(function () {
+        try {
+          (showCancel ? appModalCancel : appModalOk).focus();
+        } catch (_) {}
+      }, 10);
+    });
+  }
+
+  window.weedrModal = {
+    _initialized: true,
+    alert: function (message, title) {
+      return openAppModal({
+        title: title || 'Error',
+        message: message || '',
+        cancelLabel: null,
+      }).catch(function () {});
+    },
+    confirm: function (message, title, confirmLabel, cancelLabel) {
+      return openAppModal({
+        title: title || 'Confirm',
+        message: message || '',
+        confirmLabel: confirmLabel || 'OK',
+        cancelLabel: cancelLabel != null ? cancelLabel : 'Cancel',
+      });
+    },
+  };
+
+  if (appModalOk) {
+    appModalOk.addEventListener('click', function () { closeAppModal(true); });
+  }
+  if (appModalCancel) {
+    appModalCancel.addEventListener('click', function () { closeAppModal(false); });
+  }
+  if (appModalBackdrop) {
+    appModalBackdrop.addEventListener('click', function () { closeAppModal(false); });
+  }
+})();
+</script>

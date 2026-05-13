@@ -139,7 +139,7 @@
     if (st === 'error') {
       stopZipPoll(data.job_id);
       showZipPhase(ui, 'idle');
-      alert(data.error || 'Zip failed');
+      void window.weedrModal.alert(data.error || 'Zip failed', 'Zip failed');
       return;
     }
   }
@@ -174,7 +174,7 @@
     });
     var data = await res.json().catch(function () { return {}; });
     if (!res.ok) {
-      alert(data.error || res.statusText);
+      await window.weedrModal.alert(data.error || res.statusText, 'Could not start zip');
       return;
     }
     var jid = data.job_id;
@@ -224,7 +224,13 @@
       const rel = tr.getAttribute('data-path');
       const isDir = tr.getAttribute('data-dir') === '1';
       if (!rel) return;
-      if (!confirm('Delete ' + (isDir ? 'folder' : 'file') + ' "' + rel + '" ?')) return;
+      var okDel = await window.weedrModal.confirm(
+        'Delete ' + (isDir ? 'folder' : 'file') + ' "' + rel + '" ?',
+        'Delete',
+        'Delete',
+        'Cancel'
+      );
+      if (!okDel) return;
       const res = await fetch('{{ url_for("api_fs_delete") }}', {
         method: 'POST',
         headers: headersJson(),
@@ -232,7 +238,7 @@
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(err.error || res.statusText);
+        await window.weedrModal.alert(err.error || res.statusText, 'Could not delete');
         return;
       }
       tr.remove();

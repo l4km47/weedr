@@ -103,11 +103,17 @@
       btn.addEventListener('click', async function () {
         const id = btn.getAttribute('data-job-id');
         if (!id) return;
-        if (!confirm('Remove this zip job from the server?')) return;
+        var okZip = await window.weedrModal.confirm(
+          'Remove this zip job from the server?',
+          'Remove zip job',
+          'Remove',
+          'Cancel'
+        );
+        if (!okZip) return;
         const res = await fetch(deleteUrl(id), { method: 'DELETE', headers: headersJson() });
         const data = await res.json().catch(function () { return {}; });
         if (!res.ok) {
-          alert(data.error || res.statusText);
+          await window.weedrModal.alert(data.error || res.statusText, 'Could not remove');
           return;
         }
         loadList();
