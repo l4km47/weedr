@@ -4,6 +4,7 @@ qBittorrent-nox Web API v2 client: optional local daemon spawn, torrent ops, UI-
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -48,6 +49,32 @@ def _parse_positive_int(name: str, default: int) -> int:
         return n if n > 0 else default
     except ValueError:
         return default
+
+
+def _env_int(name: str, default: int, *, min_ok: int = 1) -> int:
+    """Parse a positive int from env; invalid or missing returns default."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        n = int(raw)
+    except ValueError:
+        return default
+    return n if n >= min_ok else default
+
+
+def _env_int_allow_neg1(name: str, default: int) -> int:
+    """Like _env_int but allows -1 (qBittorrent 'unlimited' for some slots)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        n = int(raw)
+    except ValueError:
+        return default
+    if n == -1:
+        return -1
+    return n if n > 0 else default
 
 
 # Human-readable byte rate (e.g. 4M, 1G) -> bytes/sec for qBittorrent limits.
@@ -296,6 +323,7 @@ class QBittorrentService:
         self._session.headers.update({"User-Agent": "torrent-server-qbt/1"})
         self._lock = threading.Lock()
         self._logged_in = False
+        self._throughput_prefs_applied = False
         self._daemon_proc: subprocess.Popen[str] | None = None
         self._auto_started = False
 
@@ -375,6 +403,35 @@ class QBittorrentService:
         subprocess.run(args, check=True, creationflags=creationflags)
         self._auto_started = True
 
+    def _invalidate_auth(self) -> None:
+        self._logged_in = False
+        self._throughput_prefs_applied = False
+
+    def _mark_logged_in(self) -> None:
+        self._logged_in = True
+        self._try_apply_throughput_preferences()
+
+    def _try_apply_throughput_preferences(self) -> None:
+        if self._throughput_prefs_applied:
+            return
+        if _env_bool("QBITTORRENT_SKIP_THROUGHPUT_PREFS", False):
+            self._throughput_prefs_applied = True
+            return
+        try:
+            self.apply_throughput_preferences()
+            self._throughput_prefs_applied = True
+            logger.info("Applied qBittorrent throughput session preferences (setPreferences)")
+        except Exception as e:
+            logger.warning("qBittorrent throughput preferences not applied: %s", e)
+
+    def apply_throughput_preferences(self) -> None:
+        """POST high-throughput-oriented app preferences (qBittorrent Web API setPreferences)."""
+        payload = throughput_preferences_from_env()
+        self._post(
+            "api/v2/app/setPreferences",
+            {"json": json.dumps(payload, separators=(",", ":"))},
+        )
+
     def _login_if_needed(self) -> None:
         if self._logged_in:
             return
@@ -383,7 +440,7 @@ class QBittorrentService:
             try:
                 r = self._session.get(self._api("api/v2/transfer/info"), timeout=5)
                 if r.status_code == 200:
-                    self._logged_in = True
+                    self._mark_logged_in()
                     return
             except OSError:
                 pass
@@ -391,14 +448,14 @@ class QBittorrentService:
         r = self._session.post(self._api("api/v2/auth/login"), data=data, timeout=10)
         if r.status_code != 200 or (r.text or "").strip() != "Ok.":
             raise QBittorrentError(f"qBittorrent auth failed: HTTP {r.status_code} {r.text!r}")
-        self._logged_in = True
+        self._mark_logged_in()
 
     def _post(self, path: str, data: dict[str, Any] | None = None) -> requests.Response:
         self.ensure_daemon()
         self._login_if_needed()
         r = self._session.post(self._api(path), data=data or {}, timeout=120)
         if r.status_code == 403:
-            self._logged_in = False
+            self._invalidate_auth()
             self._login_if_needed()
             r = self._session.post(self._api(path), data=data or {}, timeout=120)
         if r.status_code == 404:
@@ -412,7 +469,7 @@ class QBittorrentService:
         self._login_if_needed()
         r = self._session.get(self._api(path), params=params or {}, timeout=120)
         if r.status_code == 403:
-            self._logged_in = False
+            self._invalidate_auth()
             self._login_if_needed()
             r = self._session.get(self._api(path), params=params or {}, timeout=120)
         if r.status_code >= 400:
@@ -443,6 +500,21 @@ class QBittorrentService:
         if up_limit_bps > 0:
             data["upLimit"] = str(up_limit_bps)
         self._post("api/v2/torrents/add", data=data)
+
+    def apply_no_seeding_share_limits(self, info_hash_hex: str) -> None:
+        """When QBITTORRENT_ALLOW_SEEDING is unset/false, stop after download (ratio 0; see qBittorrent share limits)."""
+        if _env_bool("QBITTORRENT_ALLOW_SEEDING", False):
+            return
+        h = info_hash_hex.lower()
+        self._post(
+            "api/v2/torrents/setShareLimits",
+            {
+                "hashes": h,
+                "ratioLimit": "0",
+                "seedingTimeLimit": "0",
+                "inactiveSeedingTimeLimit": "-1",
+            },
+        )
 
     def add_extra_trackers(self, info_hash_hex: str) -> None:
         """Append default + env tracker list (magnet may already include some)."""
@@ -705,12 +777,18 @@ def qbt_global_options_snapshot(svc: QBittorrentService) -> dict[str, Any]:
         return {}
     keys = (
         "listen_port",
+        "max_connec",
+        "max_connec_per_torrent",
         "max_active_downloads",
         "max_active_uploads",
         "max_active_torrents",
         "dl_limit",
         "up_limit",
         "scheduler_enabled",
+        "limit_utp_rate",
+        "max_ratio_enabled",
+        "max_ratio",
+        "max_ratio_act",
     )
     return {k: prefs.get(k) for k in keys if k in prefs}
 
@@ -746,3 +824,50 @@ def throughput_limits_bps() -> tuple[int, int]:
     )
     dl_raw = os.environ.get("QBITTORRENT_MAX_DOWNLOAD_BPS") or os.environ.get("ARIA2_MAX_DOWNLOAD_LIMIT") or "0"
     return parse_rate_to_bytes_per_sec(str(dl_raw)), parse_rate_to_bytes_per_sec(str(ul_raw))
+
+
+def throughput_preferences_from_env() -> dict[str, Any]:
+    """Preferences for qBittorrent `app/setPreferences` — raises libtorrent ceilings (not swarm speed)."""
+    dl_cap, up_cap = throughput_limits_bps()
+    prefs: dict[str, Any] = {
+        "scheduler_enabled": False,
+        "dl_limit": int(dl_cap),
+        "up_limit": int(up_cap),
+        "alt_dl_limit": 0,
+        "alt_up_limit": 0,
+        "limit_utp_rate": False,
+        "limit_lan_peers": False,
+        "limit_tcp_overhead": False,
+        "max_connec": _env_int("QBITTORRENT_MAX_CONNEC", 5000, min_ok=100),
+        "max_connec_per_torrent": _env_int("QBITTORRENT_MAX_CONNEC_PER_TORRENT", 800, min_ok=20),
+        "max_uploads": _env_int_allow_neg1("QBITTORRENT_MAX_UPLOAD_SLOTS", -1),
+        "max_uploads_per_torrent": _env_int_allow_neg1("QBITTORRENT_MAX_UPLOAD_SLOTS_PER_TORRENT", -1),
+        "max_active_downloads": _env_int("QBITTORRENT_MAX_ACTIVE_DOWNLOADS", 50, min_ok=1),
+        "max_active_torrents": _env_int("QBITTORRENT_MAX_ACTIVE_TORRENTS", 200, min_ok=1),
+        "max_active_uploads": _env_int("QBITTORRENT_MAX_ACTIVE_UPLOADS", 100, min_ok=1),
+        "max_active_checking_torrents": _env_int("QBITTORRENT_MAX_ACTIVE_CHECKING", 32, min_ok=1),
+        "queueing_enabled": _env_bool("QBITTORRENT_QUEUEING_ENABLED", True),
+        "dont_count_slow_torrents": _env_bool("QBITTORRENT_DONT_COUNT_SLOW_TORRENTS", True),
+        "slow_torrent_dl_rate_threshold": _env_int("QBITTORRENT_SLOW_TORRENT_DL_KIB", 50, min_ok=1),
+        "utp_tcp_mixed_mode": _env_int("QBITTORRENT_UTP_TCP_MIXED_MODE", 0, min_ok=0),
+        "async_io_threads": _env_int("QBITTORRENT_ASYNC_IO_THREADS", 8, min_ok=1),
+        "file_pool_size": _env_int("QBITTORRENT_FILE_POOL_SIZE", 500, min_ok=40),
+    }
+    proto = (os.environ.get("QBITTORRENT_BT_PROTOCOL") or "").strip().lower()
+    if proto in ("tcp", "tcp_only", "1"):
+        prefs["bittorrent_protocol"] = 1
+    elif proto in ("utp", "utp_only", "2"):
+        prefs["bittorrent_protocol"] = 2
+    sb = (os.environ.get("QBITTORRENT_SOCKET_SEND_BUFFER") or "").strip()
+    if sb.isdigit():
+        prefs["socket_send_buffer_size"] = int(sb)
+    rb = (os.environ.get("QBITTORRENT_SOCKET_RECV_BUFFER") or "").strip()
+    if rb.isdigit():
+        prefs["socket_receive_buffer_size"] = int(rb)
+    if not _env_bool("QBITTORRENT_ALLOW_SEEDING", False):
+        # Ratio 0: pause/remove when download finishes (no post-complete seeding). max_ratio_act: 0=Pause, 1=Remove.
+        act = _env_int("QBITTORRENT_RATIO_LIMIT_ACTION", 0, min_ok=0)
+        prefs["max_ratio_enabled"] = True
+        prefs["max_ratio"] = 0.0
+        prefs["max_ratio_act"] = 1 if act >= 1 else 0
+    return prefs

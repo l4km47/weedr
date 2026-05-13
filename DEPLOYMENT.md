@@ -40,3 +40,5 @@ Use this when exposing **weedr** beyond localhost.
 The image runs as a non-root user; mounted volumes must be writable by that UID or use named volumes as in `docker-compose.yml`.
 
 BitTorrent uses **qBittorrent-nox** inside the container. Persist `QBITTORRENT_STATE_DIR` (see `docker-compose.yml`) so resume data survives restarts.
+
+On first successful Web API login, the app applies higher default connection and queue limits via qBittorrent’s `setPreferences` (see `.env.example` for `QBITTORRENT_*` overrides and `QBITTORRENT_SKIP_THROUGHPUT_PREFS`). By default it also enables **share ratio 0** (no post-complete seeding; torrents pause or are removed from the client per `QBITTORRENT_RATIO_LIMIT_ACTION`) and sets the same limits on each added magnet; set `QBITTORRENT_ALLOW_SEEDING=1` to opt out. Real download speed still depends on swarm health, disk, and uplink; on Linux hosts with multi‑gigabit links you may also need larger TCP buffers and a higher `ulimit -n` than stock defaults.

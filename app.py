@@ -857,13 +857,19 @@ def create_app() -> Flask:
         try:
             svc = ensure_qbittorrent()
             svc.add_magnet(magnet, final_dir, dl_limit_bps=dl_bps, up_limit_bps=ul_bps)
-            if svc.wait_for_torrent(ih, timeout=90.0):
+            waited = svc.wait_for_torrent(ih, timeout=90.0)
+            if waited:
                 svc.add_extra_trackers(ih)
             else:
                 try:
                     svc.add_extra_trackers(ih)
                 except QBittorrentError:
                     pass
+            try:
+                svc.apply_no_seeding_share_limits(ih)
+            except QBittorrentError:
+                if waited:
+                    raise
         except QBittorrentError as e:
             return {"error": str(e)}, 503
 

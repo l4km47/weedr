@@ -1,9 +1,13 @@
 """Unit tests for qBittorrent client helpers (no live daemon)."""
 
+import os
+from unittest.mock import patch
+
 from qbittorrent_service import (
     enrich_global_stat,
     normalize_qbt_torrent,
     parse_rate_to_bytes_per_sec,
+    throughput_preferences_from_env,
 )
 
 
@@ -40,3 +44,53 @@ def test_enrich_global_stat():
     s = enrich_global_stat({"downloadSpeed": "1024", "uploadSpeed": "0"})
     assert s["downloadSpeed_bps"] == 1024
     assert "download_speed_human" in s
+
+
+def test_throughput_preferences_from_env_defaults():
+    with patch.dict(os.environ, {"PATH": os.environ.get("PATH", "")}, clear=True):
+        d = throughput_preferences_from_env()
+    assert d["max_connec"] == 5000
+    assert d["max_connec_per_torrent"] == 800
+    assert d["max_active_downloads"] == 50
+    assert d["scheduler_enabled"] is False
+    assert d["limit_utp_rate"] is False
+    assert d["dl_limit"] == 0 and d["up_limit"] == 0
+    assert "bittorrent_protocol" not in d
+    assert d["max_ratio_enabled"] is True
+    assert d["max_ratio"] == 0.0
+    assert d["max_ratio_act"] == 0
+
+
+def test_throughput_preferences_from_env_overrides():
+    with patch.dict(
+        os.environ,
+        {
+            "PATH": os.environ.get("PATH", ""),
+            "QBITTORRENT_MAX_CONNEC": "1200",
+            "QBITTORRENT_BT_PROTOCOL": "tcp",
+        },
+        clear=True,
+    ):
+        d = throughput_preferences_from_env()
+    assert d["max_connec"] == 1200
+    assert d["bittorrent_protocol"] == 1
+
+
+def test_throughput_prefs_allow_seeding_omits_ratio_limit():
+    with patch.dict(
+        os.environ,
+        {"PATH": os.environ.get("PATH", ""), "QBITTORRENT_ALLOW_SEEDING": "1"},
+        clear=True,
+    ):
+        d = throughput_preferences_from_env()
+    assert "max_ratio_enabled" not in d
+
+
+def test_throughput_prefs_ratio_limit_action_remove():
+    with patch.dict(
+        os.environ,
+        {"PATH": os.environ.get("PATH", ""), "QBITTORRENT_RATIO_LIMIT_ACTION": "1"},
+        clear=True,
+    ):
+        d = throughput_preferences_from_env()
+    assert d["max_ratio_act"] == 1

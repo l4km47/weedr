@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install Python deps, detect qbittorrent-nox, create .env with secrets if missing, start PM2 on port 8000.
 # Optional env knobs (zip SQLite, health deep checks, IP allowlist, signed file URLs, audit, webhooks,
-# RSS): see .env.example and DEPLOYMENT.md. Docker: docker-compose.yml + Dockerfile.
+# RSS, qBittorrent throughput QBITTORRENT_MAX_* / *_ACTIVE_* / *_ASYNC_IO_*): see .env.example and DEPLOYMENT.md. Docker: docker-compose.yml + Dockerfile.
 #
 # Web UI (after deploy): / — overview (disk, magnets, HTTP preview)
 #                        /torrents — BT transfers + charts (Chart.js CDN)
@@ -15,6 +15,15 @@ cd "$ROOT"
 
 info() { printf '[build] %s\n' "$*"; }
 die() { printf '[build] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Append KEY=val to .env if that key is not already set (first line wins).
+_append_env_if_missing() {
+  local envf="$1" key="$2" val="$3"
+  if ! grep -q "^${key}=" "$envf"; then
+    echo "${key}=${val}" >> "$envf"
+    info "appended ${key}=${val}"
+  fi
+}
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
@@ -131,7 +140,26 @@ QBITTORRENT_BYPASS_LOCAL_AUTH=1
 QBITTORRENT_BIN=${QBT_BIN}
 # Optional fixed WebUI port for auto-spawned daemon (otherwise an ephemeral localhost port is chosen).
 # QBITTORRENT_WEBUI_PORT=8080
-# Per-torrent rate limits use the same env names as the old aria2 build for compatibility:
+
+# --- qBittorrent throughput defaults (fed into app setPreferences on login; tune ulimit -n / sysctl for 10G) ---
+QBITTORRENT_MAX_CONNEC=5000
+QBITTORRENT_MAX_CONNEC_PER_TORRENT=800
+QBITTORRENT_MAX_UPLOAD_SLOTS=-1
+QBITTORRENT_MAX_UPLOAD_SLOTS_PER_TORRENT=-1
+QBITTORRENT_MAX_ACTIVE_DOWNLOADS=50
+QBITTORRENT_MAX_ACTIVE_TORRENTS=200
+QBITTORRENT_MAX_ACTIVE_UPLOADS=100
+QBITTORRENT_MAX_ACTIVE_CHECKING=32
+QBITTORRENT_QUEUEING_ENABLED=1
+QBITTORRENT_DONT_COUNT_SLOW_TORRENTS=1
+QBITTORRENT_SLOW_TORRENT_DL_KIB=50
+QBITTORRENT_UTP_TCP_MIXED_MODE=0
+QBITTORRENT_ASYNC_IO_THREADS=8
+QBITTORRENT_FILE_POOL_SIZE=500
+# Optional: force TCP (if uTP is slow): QBITTORRENT_BT_PROTOCOL=tcp
+# Optional explicit B/s caps for setPreferences: QBITTORRENT_MAX_DOWNLOAD_BPS=0 QBITTORRENT_MAX_UPLOAD_BPS=0
+
+# Per-torrent rate limits use the same env names as the old aria2 build for compatibility (0 = unlimited):
 ARIA2_MAX_UPLOAD_LIMIT=0
 ARIA2_MAX_DOWNLOAD_LIMIT=0
 ARIA2_SEED_TIME=0
@@ -191,18 +219,24 @@ else
     echo "ARIA2_SEED_RATIO=0" >> "$ENV_FILE"
     info "appended ARIA2_SEED_RATIO=0"
   fi
-  # --- 10G tuning: append missing knobs (rate limits; optional tracker override) ---
-  declare -A NEW_VARS=(
-    [ARIA2_MAX_UPLOAD_LIMIT]=0
-    [ARIA2_MAX_DOWNLOAD_LIMIT]=0
-    [QBITTORRENT_BYPASS_LOCAL_AUTH]=1
-  )
-  for KEY in "${!NEW_VARS[@]}"; do
-    if ! grep -q "^${KEY}=" "$ENV_FILE"; then
-      echo "${KEY}=${NEW_VARS[$KEY]}" >> "$ENV_FILE"
-      info "appended ${KEY}=${NEW_VARS[$KEY]}"
-    fi
-  done
+  # --- High-throughput + rate-limit defaults (match qbittorrent_service throughput_preferences_from_env) ---
+  _append_env_if_missing "$ENV_FILE" ARIA2_MAX_UPLOAD_LIMIT 0
+  _append_env_if_missing "$ENV_FILE" ARIA2_MAX_DOWNLOAD_LIMIT 0
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_BYPASS_LOCAL_AUTH 1
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_MAX_CONNEC 5000
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_MAX_CONNEC_PER_TORRENT 800
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_MAX_UPLOAD_SLOTS -1
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_MAX_UPLOAD_SLOTS_PER_TORRENT -1
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_MAX_ACTIVE_DOWNLOADS 50
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_MAX_ACTIVE_TORRENTS 200
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_MAX_ACTIVE_UPLOADS 100
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_MAX_ACTIVE_CHECKING 32
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_QUEUEING_ENABLED 1
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_DONT_COUNT_SLOW_TORRENTS 1
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_SLOW_TORRENT_DL_KIB 50
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_UTP_TCP_MIXED_MODE 0
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_ASYNC_IO_THREADS 8
+  _append_env_if_missing "$ENV_FILE" QBITTORRENT_FILE_POOL_SIZE 500
   if ! grep -q '^# --- torrent-server optional vars' "$ENV_FILE"; then
     cat >> "$ENV_FILE" <<'OPTIONAL_EOF'
 
@@ -227,7 +261,7 @@ else
 # RSS_MAX_MAGNETS_PER_POLL=5
 # RSS_PARENT_SUBDIR=
 # RSS_STATE_DB=
-# (qBittorrent / rate-limit envs: see .env.example — QBITTORRENT_*, ARIA2_MAX_* for per-torrent caps)
+# (Throughput defaults are appended by build.sh; see .env.example for QBITTORRENT_SKIP_THROUGHPUT_PREFS, BT_PROTOCOL, sockets, seeding.)
 OPTIONAL_EOF
     info "appended optional-var comments (see .env.example)"
   fi
@@ -262,7 +296,7 @@ if ! command -v pm2 >/dev/null 2>&1; then
 fi
 
 pm2 delete torrent-server >/dev/null 2>&1 || true
-pm2 start "$ROOT/run.sh" --name torrent-server --time --interpreter bash
+pm2 start "$ROOT/run.sh" --name weedr --time --interpreter bash
 pm2 save
 
 LISTEN_HOST="$(grep -E '^HOST=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || echo 0.0.0.0)"
