@@ -1,7 +1,7 @@
 {% extends "layout_app.html" %}
 {% block title %}Transfers · weedr{% endblock %}
 {% block page_heading %}Transfers{% endblock %}
-{% block page_sub %}<p class="page-sub">Pick a torrent on the left — details, files, and speed chart update live.</p>{% endblock %}
+{% block page_sub %}<p class="page-sub">Pick a torrent on the left — add a <strong>magnet</strong> or <strong>.torrent</strong> file, then details, files, and speed chart update live.</p>{% endblock %}
 {% block header_tools %}
 <div class="header-add-toolbar">
   <form id="magnet-form" class="magnet-inline-form">
@@ -9,6 +9,8 @@
     <input type="text" id="magnet" name="magnet" class="magnet-inline-field magnet-inline-magnet" placeholder="Magnet URI — paste or tap to pull from clipboard" autocomplete="off" spellcheck="false" inputmode="text">
     <button type="submit" class="btn primary btn-sm magnet-inline-submit">Add</button>
   </form>
+  <label class="sr-only" for="torrent-file-input">Torrent file</label>
+  <input type="file" id="torrent-file-input" class="magnet-inline-field magnet-inline-file" accept=".torrent,application/x-bittorrent" title="Add .torrent file">
   <label class="sr-only" for="torrent-filter">Filter</label>
   <input type="search" id="torrent-filter" class="magnet-inline-field magnet-inline-filter" placeholder="Filter list…" autocomplete="off">
   <p id="magnet-msg" class="magnet-inline-msg small hidden"></p>
@@ -107,6 +109,8 @@
   const detailCanvas = document.getElementById('detail-chart-canvas');
   const shell = document.getElementById('transfers-shell');
   const DETAIL_URL_TEMPLATE = {{ url_for('api_torrent_detail', gid='__GID_PLACEHOLDER__') | tojson }};
+  const TORRENTS_ADD_URL = {{ url_for('api_torrents_add') | tojson }};
+  const torrentFileInput = document.getElementById('torrent-file-input');
 
   let lastDownloads = null;
   let selectedGid = null;
@@ -622,7 +626,7 @@
         magnetMsg.classList.add('error');
         return;
       }
-      const res = await apiFetch('{{ url_for("api_torrents_add") }}', {
+      const res = await apiFetch(TORRENTS_ADD_URL, {
         method: 'POST',
         headers: headersJson(),
         body: JSON.stringify({ magnet: magnet }),
@@ -643,7 +647,46 @@
     });
   }
 
-  if (filterInput) {
+  if (torrentFileInput) {
+    torrentFileInput.addEventListener('change', async function () {
+      var files = torrentFileInput.files;
+      if (!files || !files.length) return;
+      var f = files[0];
+      magnetMsg.classList.add('hidden');
+      if (!csrfToken) {
+        magnetMsg.textContent = 'Missing CSRF token — reload the page.';
+        magnetMsg.classList.remove('hidden', 'ok');
+        magnetMsg.classList.add('error');
+        torrentFileInput.value = '';
+        return;
+      }
+      var fd = new FormData();
+      fd.append('csrf_token', csrfToken);
+      fd.append('torrent', f, f.name || 'upload.torrent');
+      try {
+        var res = await fetch(TORRENTS_ADD_URL, { method: 'POST', body: fd, credentials: 'same-origin' });
+        var data = await res.json().catch(function () { return ({}); });
+        if (!res.ok) {
+          magnetMsg.textContent = data.error || res.statusText;
+          magnetMsg.classList.remove('hidden', 'ok');
+          magnetMsg.classList.add('error');
+          torrentFileInput.value = '';
+          return;
+        }
+        var extra = data.save_folder ? (' Saved under: ' + data.save_folder + '.') : '';
+        magnetMsg.textContent = 'Added torrent file (gid ' + data.gid + ').' + extra;
+        magnetMsg.classList.remove('hidden', 'error');
+        magnetMsg.classList.add('ok');
+        torrentFileInput.value = '';
+        pollTorrents();
+      } catch (err) {
+        magnetMsg.textContent = 'Could not upload torrent file.';
+        magnetMsg.classList.remove('hidden', 'ok');
+        magnetMsg.classList.add('error');
+        torrentFileInput.value = '';
+      }
+    });
+  }
     filterInput.addEventListener('input', function () {
       if (lastDownloads) renderTorrentTables();
     });

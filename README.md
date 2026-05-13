@@ -7,7 +7,7 @@ Use it responsibly: only download and share content you have the right to distri
 ## What you get
 
 - **Overview** (`/`) — disk usage, quick magnet preview, HTTP download activity summary  
-- **Torrents** (`/torrents`) — add magnets, pause/resume/prioritize/remove, global qBittorrent stats  
+- **Torrents** (`/torrents`) — add magnets or `.torrent` files, pause/resume/prioritize/remove, global qBittorrent stats  
 - **Files** (`/files`) — browse under `DOWNLOAD_DIR`, delete paths, optional folder ZIP jobs, signed download tokens when configured  
 - **Activity** (`/activity`) — live view of clients hitting `GET /files/…` (useful behind a reverse proxy with real client IPs)  
 - **Zips** (`/zips`) — background ZIP creation with SQLite-backed job state (shared across gunicorn workers)  
@@ -98,7 +98,7 @@ All routes below expect a logged-in session cookie except `/health` and `/login`
 | GET | `/health` | Liveness; optional deep checks |
 | GET | `/api/torrents` | List downloads |
 | GET | `/api/torrents/<gid>/detail` | Single download detail (`gid` = 40-char info-hash v1 hex) |
-| POST | `/api/torrents/add` | Add magnet / URI |
+| POST | `/api/torrents/add` | JSON `{"magnet":"…"}` or multipart form field `torrent` (`.torrent` file) + optional `parent`; CSRF required |
 | POST | `/api/torrents/<gid>/pause` | Pause |
 | POST | `/api/torrents/<gid>/resume` | Resume |
 | POST | `/api/torrents/<gid>/prioritize` | Prioritize |
@@ -135,6 +135,7 @@ Browser UI: `/`, `/torrents`, `/files`, `/activity`, `/zips`. Static files live 
 | `qbittorrent_service.py` | qBittorrent Web API client, optional auto-spawn, UI-shaped stats |
 | `trackers_util.py` | Shared tracker list (trackers_best) |
 | `magnet_util.py` | Magnet parsing and safe subfolder naming |
+| `torrent_file_util.py` | `.torrent` bencode (v1) parsing for info-hash and folder label |
 | `pathutil.py` | Path safety helpers under `DOWNLOAD_DIR` |
 | `zip_jobs_store.py` | SQLite zip job persistence |
 | `rss_grabber.py` | Optional RSS polling helpers |

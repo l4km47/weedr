@@ -37,8 +37,10 @@ from flask import (
 from flask_limiter import Limiter
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash
+from werkzeug.utils import secure_filename
 
 from magnet_util import auto_subfolder_name, btih_info_hash_v1_hex, parse_magnet, pick_unique_dir
+from torrent_file_util import TorrentFileError, parse_torrent_metainfo
 from qbittorrent_service import (
     QBittorrentError,
     get_service as get_qbittorrent_service,
@@ -821,6 +823,26 @@ def create_app() -> Flask:
         if not require_auth():
             abort(401)
 
+    def _torrent_file_max_bytes() -> int:
+        raw = (os.environ.get("TORRENT_FILE_MAX_BYTES") or "").strip()
+        if raw.isdigit():
+            return max(4096, min(int(raw), 256 * 1024 * 1024))
+        return 32 * 1024 * 1024
+
+    def _after_qbittorrent_add(svc, ih: str, waited: bool) -> None:
+        if waited:
+            svc.add_extra_trackers(ih)
+        else:
+            try:
+                svc.add_extra_trackers(ih)
+            except QBittorrentError:
+                pass
+        try:
+            svc.apply_no_seeding_share_limits(ih)
+        except QBittorrentError:
+            if waited:
+                raise
+
     def magnet_add_handler(magnet: str, parent_rel: str = "") -> tuple[dict[str, Any], int]:
         """Parse and queue a magnet in DOWNLOAD_DIR (optional parent subfolder). Used by UI and RSS."""
         if not magnet.lower().startswith("magnet:"):
@@ -858,18 +880,53 @@ def create_app() -> Flask:
             svc = ensure_qbittorrent()
             svc.add_magnet(magnet, final_dir, dl_limit_bps=dl_bps, up_limit_bps=ul_bps)
             waited = svc.wait_for_torrent(ih, timeout=90.0)
-            if waited:
-                svc.add_extra_trackers(ih)
-            else:
-                try:
-                    svc.add_extra_trackers(ih)
-                except QBittorrentError:
-                    pass
-            try:
-                svc.apply_no_seeding_share_limits(ih)
-            except QBittorrentError:
-                if waited:
-                    raise
+            _after_qbittorrent_add(svc, ih, waited)
+        except QBittorrentError as e:
+            return {"error": str(e)}, 503
+
+        rel_dir = str(final_dir.relative_to(DOWNLOAD_DIR)).replace("\\", "/")
+        return {"ok": True, "gid": ih, "save_folder": rel_dir}, 200
+
+    def torrent_file_add_handler(
+        file_bytes: bytes, filename: str, parent_rel: str = ""
+    ) -> tuple[dict[str, Any], int]:
+        """Parse .torrent (v1 metainfo), pick save folder, add via qBittorrent multipart API."""
+        max_b = _torrent_file_max_bytes()
+        if len(file_bytes) > max_b:
+            return {"error": f"Torrent file too large (max {max_b} bytes)"}, 400
+        try:
+            meta = parse_torrent_metainfo(file_bytes)
+        except TorrentFileError as e:
+            return {"error": str(e)}, 400
+        ih = meta["info_hash_hex"]
+        display = (meta.get("display_name") or "").strip() or "torrent"
+        dn = display if display != "torrent" else None
+
+        parent_rel = str(parent_rel).strip().strip("/")
+        base = DOWNLOAD_DIR
+        if parent_rel:
+            if ".." in parent_rel.split("/"):
+                return {"error": "Invalid parent path"}, 400
+            p = (DOWNLOAD_DIR / parent_rel).resolve()
+            parent_safe = safe_under_root(DOWNLOAD_DIR, p)
+            if parent_safe is None:
+                return {"error": "Invalid parent path"}, 400
+            base = parent_safe
+            base.mkdir(parents=True, exist_ok=True)
+
+        folder_label = auto_subfolder_name(dn, ih)
+        final_dir = pick_unique_dir(base, folder_label)
+
+        safe_fn = secure_filename(filename or "") or "upload.torrent"
+        if not safe_fn.lower().endswith(".torrent"):
+            safe_fn = f"{safe_fn}.torrent"
+
+        dl_bps, ul_bps = throughput_limits_bps()
+        try:
+            svc = ensure_qbittorrent()
+            svc.add_torrent_file(file_bytes, safe_fn, final_dir, dl_limit_bps=dl_bps, up_limit_bps=ul_bps)
+            waited = svc.wait_for_torrent(ih, timeout=90.0)
+            _after_qbittorrent_add(svc, ih, waited)
         except QBittorrentError as e:
             return {"error": str(e)}, 503
 
@@ -959,7 +1016,6 @@ def create_app() -> Flask:
     def api_torrents_add():
         _auth_json()
         body = request.get_json(silent=True) or {}
-        magnet = (request.form.get("magnet") or body.get("magnet") or "").strip()
         parent_rel = (
             body.get("parent")
             or body.get("subdir")
@@ -968,6 +1024,12 @@ def create_app() -> Flask:
             or ""
         )
         parent_rel = str(parent_rel).strip().strip("/")
+        up = request.files.get("torrent")
+        if up is not None and getattr(up, "filename", None):
+            raw = up.read()
+            payload, code = torrent_file_add_handler(raw, up.filename or "upload.torrent", parent_rel)
+            return jsonify(payload), code
+        magnet = (request.form.get("magnet") or body.get("magnet") or "").strip()
         payload, code = magnet_add_handler(magnet, parent_rel)
         return jsonify(payload), code
 

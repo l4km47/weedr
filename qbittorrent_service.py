@@ -566,6 +566,50 @@ class QBittorrentService:
             data["upLimit"] = str(up_limit_bps)
         self._post("api/v2/torrents/add", data=data)
 
+    def add_torrent_file(
+        self,
+        torrent_data: bytes,
+        torrent_filename: str,
+        save_path: Path,
+        *,
+        dl_limit_bps: int = 0,
+        up_limit_bps: int = 0,
+    ) -> None:
+        """POST multipart torrents/add with raw .torrent body (field name `torrents`)."""
+        data: dict[str, Any] = {
+            "savepath": str(save_path.resolve()),
+            "paused": "false",
+            "root_folder": "false",
+            "skip_checking": "false",
+        }
+        if dl_limit_bps > 0:
+            data["dlLimit"] = str(dl_limit_bps)
+        if up_limit_bps > 0:
+            data["upLimit"] = str(up_limit_bps)
+        name = (torrent_filename or "file.torrent").strip() or "file.torrent"
+        files = {"torrents": (name, torrent_data, "application/x-bittorrent")}
+        self._post_multipart("api/v2/torrents/add", data=data, files=files)
+
+    def _post_multipart(
+        self,
+        path: str,
+        *,
+        data: dict[str, Any],
+        files: dict[str, Any],
+    ) -> requests.Response:
+        self.ensure_daemon()
+        self._login_if_needed()
+        r = self._session.post(self._api(path), data=data, files=files, timeout=180)
+        if r.status_code == 403:
+            self._invalidate_auth()
+            self._login_if_needed()
+            r = self._session.post(self._api(path), data=data, files=files, timeout=180)
+        if r.status_code == 404:
+            raise QBittorrentError(f"API not found: {path}")
+        if r.status_code >= 400:
+            raise QBittorrentError(f"qBittorrent API error {r.status_code}: {r.text[:500]}")
+        return r
+
     def apply_no_seeding_share_limits(self, info_hash_hex: str) -> None:
         """When QBITTORRENT_ALLOW_SEEDING is unset/false, stop after download (ratio 0; see qBittorrent share limits)."""
         if _env_bool("QBITTORRENT_ALLOW_SEEDING", False):
