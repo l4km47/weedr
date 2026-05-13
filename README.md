@@ -33,7 +33,7 @@ The repo includes a scripted path that creates a venv, generates `.env` if missi
 ```
 
 - First run prints a generated **dashboard password** once; save it.  
-- Requires **openssl**, **pm2** (`npm install -g pm2`), and **qbittorrent-nox** installed on the host.  
+- Requires **openssl**, **pm2** (`npm install -g pm2`), and **qbittorrent-nox** on `PATH` — or on **Linux** without root, `build.sh` downloads a [static `qbittorrent-nox`](https://github.com/userdocs/qbittorrent-nox-static) into `~/.local/bin` when `curl`/`wget` is available (set `QBITTORRENT_SKIP_STATIC_INSTALL=1` to skip).  
 - Default listen address and port come from `.env` (`HOST`, `PORT`; build defaults often `0.0.0.0:8000`).
 
 Logs and restarts:

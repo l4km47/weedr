@@ -26,19 +26,74 @@ if ! command -v openssl >/dev/null 2>&1; then
 fi
 
 # --- qBittorrent-nox (BitTorrent engine) -----------------------------------
+# Prefer system package; on Linux without root, fetch a static binary from
+# https://github.com/userdocs/qbittorrent-nox-static (releases/latest).
+# Set QBITTORRENT_SKIP_STATIC_INSTALL=1 to disable that fetch.
+
+download_to_file() {
+  local url="$1" out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --connect-timeout 20 --max-time 600 -o "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$out" "$url"
+  else
+    return 1
+  fi
+}
+
+qbt_static_asset_name() {
+  case "$(uname -m)" in
+    x86_64 | amd64) echo "x86_64-qbittorrent-nox" ;;
+    aarch64 | arm64) echo "aarch64-qbittorrent-nox" ;;
+    armv7l) echo "armv7-qbittorrent-nox" ;;
+    armv6l | armhf) echo "armhf-qbittorrent-nox" ;;
+    riscv64) echo "riscv64-qbittorrent-nox" ;;
+    i386 | i686) echo "x86-qbittorrent-nox" ;;
+    *) echo "" ;;
+  esac
+}
+
+install_qbittorrent_nox_static() {
+  local asset dest tmp url
+  [[ "$(uname -s)" == "Linux" ]] || return 1
+  [[ "${QBITTORRENT_SKIP_STATIC_INSTALL:-0}" != "1" ]] || return 1
+  asset="$(qbt_static_asset_name)"
+  [[ -n "$asset" ]] || return 1
+  dest="${HOME}/.local/bin/qbittorrent-nox"
+  mkdir -p "${HOME}/.local/bin"
+  tmp="$(mktemp)"
+  url="https://github.com/userdocs/qbittorrent-nox-static/releases/latest/download/${asset}"
+  info "Downloading static qbittorrent-nox (${asset}) to ${dest} …"
+  if ! download_to_file "$url" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod +x "$tmp"
+  mv -f "$tmp" "$dest"
+  export PATH="${HOME}/.local/bin:${PATH}"
+  info "Installed static qbittorrent-nox (userdocs/qbittorrent-nox-static)."
+  return 0
+}
+
 QBT_BIN=""
-if [[ -n "${QBITTORRENT_BIN_OVERRIDE:-}" ]]; then
-  QBT_BIN="$QBITTORRENT_BIN_OVERRIDE"
+if [[ -n "${QBITTORRENT_BIN:-}" ]]; then
+  QBT_BIN="${QBITTORRENT_BIN}"
+elif [[ -n "${QBITTORRENT_BIN_OVERRIDE:-}" ]]; then
+  QBT_BIN="${QBITTORRENT_BIN_OVERRIDE}"
 elif command -v qbittorrent-nox >/dev/null 2>&1; then
   QBT_BIN="$(command -v qbittorrent-nox)"
+elif [[ -x "${HOME}/.local/bin/qbittorrent-nox" ]]; then
+  QBT_BIN="${HOME}/.local/bin/qbittorrent-nox"
 elif [[ -x /usr/bin/qbittorrent-nox ]]; then
   QBT_BIN="/usr/bin/qbittorrent-nox"
 elif [[ -x /usr/local/bin/qbittorrent-nox ]]; then
   QBT_BIN="/usr/local/bin/qbittorrent-nox"
+elif install_qbittorrent_nox_static; then
+  QBT_BIN="${HOME}/.local/bin/qbittorrent-nox"
 fi
 
 if [[ -z "$QBT_BIN" || ! -x "$QBT_BIN" ]]; then
-  die "qbittorrent-nox not found. Install qbittorrent-nox or set QBITTORRENT_BIN_OVERRIDE."
+  die "qbittorrent-nox not found. Install it (e.g. apt install qbittorrent-nox, brew install qbittorrent), set QBITTORRENT_BIN, or on Linux leave QBITTORRENT_SKIP_STATIC_INSTALL unset and use curl/wget to fetch a static build."
 fi
 info "Using qBittorrent at: $QBT_BIN"
 
@@ -73,6 +128,7 @@ SESSION_HOURS=10
 QBITTORRENT_AUTO_START=1
 QBITTORRENT_STATE_DIR=${HOME}/.cache/torrent-server
 QBITTORRENT_BYPASS_LOCAL_AUTH=1
+QBITTORRENT_BIN=${QBT_BIN}
 # Optional fixed WebUI port for auto-spawned daemon (otherwise an ephemeral localhost port is chosen).
 # QBITTORRENT_WEBUI_PORT=8080
 # Per-torrent rate limits use the same env names as the old aria2 build for compatibility:
@@ -111,6 +167,10 @@ else
   if ! grep -q '^QBITTORRENT_STATE_DIR=' "$ENV_FILE"; then
     echo "QBITTORRENT_STATE_DIR=${HOME}/.cache/torrent-server" >> "$ENV_FILE"
     info "appended QBITTORRENT_STATE_DIR"
+  fi
+  if ! grep -q '^QBITTORRENT_BIN=' "$ENV_FILE" && [[ "$QBT_BIN" == "${HOME}/.local/bin/qbittorrent-nox" ]]; then
+    echo "QBITTORRENT_BIN=${QBT_BIN}" >> "$ENV_FILE"
+    info "appended QBITTORRENT_BIN (static install path)"
   fi
   if ! grep -q '^QBITTORRENT_AUTO_START=' "$ENV_FILE"; then
     echo "QBITTORRENT_AUTO_START=1" >> "$ENV_FILE"
