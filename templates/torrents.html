@@ -110,6 +110,7 @@
 
   let lastDownloads = null;
   let selectedGid = null;
+  let detailOptsGridBoundGid = null;
   let detailChart = null;
   const speedHistory = {};
   const MAX_POINTS = 120;
@@ -320,14 +321,20 @@
     detailActions.innerHTML = btns;
   }
 
-  function fillOptsGrid(gid) {
+  function fillOptsGrid(gid, prefill) {
     if (!detailOptsGrid) return;
+    prefill = prefill || {};
     const gidEsc = esc(gid);
     detailOptsGrid.innerHTML =
       '<label>Max down <input type="text" data-opt="max-download-limit" placeholder="e.g. 4M or 0"></label>' +
       '<label>Max up <input type="text" data-opt="max-upload-limit" placeholder="e.g. 1M or 0"></label>' +
-      '<label>Seed ratio <input type="text" data-opt="seed-ratio" placeholder="default"></label>';
+      '<label>Seed ratio <input type="text" data-opt="seed-ratio" placeholder="empty = global / unlimited"></label>' +
+      '<label>Seed time (min) <input type="text" data-opt="seed-time" placeholder="minutes"></label>';
     document.getElementById('detail-save-opts').setAttribute('data-gid', gid);
+    detailOptsGrid.querySelectorAll('input[data-opt]').forEach(function (inp) {
+      const k = inp.getAttribute('data-opt');
+      if (k && prefill[k] != null && String(prefill[k]).length) inp.value = String(prefill[k]);
+    });
   }
 
   function applyDetailPayload(data) {
@@ -369,12 +376,23 @@
     }
 
     renderDetailActions(t);
-    fillOptsGrid(t.gid);
+    const gid = t.gid;
+    const needOptsRefresh = detailOptsGridBoundGid !== gid;
+    if (needOptsRefresh) {
+      fillOptsGrid(gid, {
+        'max-download-limit': t.opt_max_download_limit || '',
+        'max-upload-limit': t.opt_max_upload_limit || '',
+        'seed-ratio': t.opt_seed_ratio || '',
+        'seed-time': t.opt_seed_time || '',
+      });
+      detailOptsGridBoundGid = gid;
+    }
     updateDetailChart(t.gid);
   }
 
   async function loadDetailPanel() {
     if (!selectedGid) {
+      detailOptsGridBoundGid = null;
       detailEmpty.classList.remove('hidden');
       detailBody.classList.add('hidden');
       destroyDetailChart();
@@ -388,6 +406,7 @@
         detailErr.textContent = 'This download is no longer in qBittorrent.';
         detailErr.classList.remove('hidden');
         selectedGid = null;
+        detailOptsGridBoundGid = null;
         renderTorrentList();
         detailEmpty.classList.remove('hidden');
         detailBody.classList.add('hidden');
@@ -431,6 +450,7 @@
       const still = visible.some(function (t) { return t.gid === selectedGid; });
       if (!still) {
         selectedGid = null;
+        detailOptsGridBoundGid = null;
         detailEmpty.classList.remove('hidden');
         detailBody.classList.add('hidden');
         destroyDetailChart();
@@ -490,7 +510,11 @@
       if (!res.ok) {
         const err = await res.json().catch(function () { return {}; });
         alert(err.error || res.statusText);
+        return;
       }
+      detailOptsGridBoundGid = null;
+      loadDetailPanel();
+      pollTorrents();
       return;
     }
 

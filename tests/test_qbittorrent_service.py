@@ -4,12 +4,27 @@ import os
 from unittest.mock import patch
 
 from qbittorrent_service import (
+    _set_share_limits_payload,
+    _torrent_options_ui_prefill,
     enrich_global_stat,
     normalize_qbt_torrent,
     parse_rate_to_bytes_per_sec,
     throughput_preferences_from_env,
-    _set_share_limits_payload,
 )
+
+
+def test_torrent_options_ui_prefill():
+    raw = {
+        "dl_limit": 1048576,
+        "up_limit": -1,
+        "ratio_limit": 2.0,
+        "max_seeding_time": 3660,
+    }
+    d = _torrent_options_ui_prefill(raw)
+    assert d["opt_max_download_limit"] == "1048576"
+    assert d["opt_max_upload_limit"] == ""
+    assert d["opt_seed_ratio"] == "2"
+    assert d["opt_seed_time"] == "61"
 
 
 def test_parse_rate_to_bytes_per_sec():

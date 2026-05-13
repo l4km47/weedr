@@ -271,6 +271,47 @@ def _pick_raw(raw: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _torrent_options_ui_prefill(raw: dict[str, Any]) -> dict[str, str]:
+    """Strings for the torrent detail limits form (empty = unlimited / use global in qBT)."""
+    out: dict[str, str] = {}
+    try:
+        dl_lim = int(raw.get("dl_limit") or -1)
+    except (TypeError, ValueError):
+        dl_lim = -1
+    try:
+        ul_lim = int(raw.get("up_limit") or -1)
+    except (TypeError, ValueError):
+        ul_lim = -1
+    if dl_lim > 0:
+        out["opt_max_download_limit"] = str(dl_lim)
+    else:
+        out["opt_max_download_limit"] = ""
+    if ul_lim > 0:
+        out["opt_max_upload_limit"] = str(ul_lim)
+    else:
+        out["opt_max_upload_limit"] = ""
+    rl = _pick_raw(raw, "ratio_limit", "max_ratio")
+    try:
+        rx = float(rl) if rl is not None else -1.0
+    except (TypeError, ValueError):
+        rx = -1.0
+    if rx >= 0:
+        out["opt_seed_ratio"] = str(int(rx)) if abs(rx - round(rx)) < 1e-9 else str(rx).rstrip("0").rstrip(".")
+    else:
+        out["opt_seed_ratio"] = ""
+    st = _pick_raw(raw, "max_seeding_time", "seeding_time_limit")
+    try:
+        sec = int(st) if st is not None else -1
+    except (TypeError, ValueError):
+        sec = -1
+    # torrents/info documents max_seeding_time in seconds; UI + setShareLimits use minutes
+    if sec >= 0:
+        out["opt_seed_time"] = str(max(0, sec // 60))
+    else:
+        out["opt_seed_time"] = ""
+    return out
+
+
 def normalize_qbt_torrent(raw: dict[str, Any]) -> dict[str, Any]:
     gid = str(raw.get("hash") or "").lower()
     state = str(raw.get("state") or "")
@@ -608,6 +649,7 @@ class QBittorrentService:
             return None
         raw = rows[0]
         torrent = normalize_qbt_torrent(raw)
+        torrent.update(_torrent_options_ui_prefill(raw))
         fr = self._get("api/v2/torrents/files", params={"hash": h})
         files = fr.json()
         files_out: list[dict[str, Any]] = []
@@ -735,8 +777,8 @@ class QBittorrentService:
                         ratio_limit=r_val,
                         seeding_time_limit=t_val,
                         inactive_seeding_time_limit=str(-1),
-                        share_limit_action="Default",
-                        share_limits_mode="Default",
+                        share_limit_action="Stop",
+                        share_limits_mode="MatchAny",
                     ),
                 },
             )
