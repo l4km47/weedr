@@ -282,6 +282,10 @@ def _zip_download_validators(full: Path) -> tuple[str, datetime]:
     etag = f"{st.st_size:x}-{st.st_ino:x}"
     lm = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).replace(microsecond=0)
     return etag, lm
+
+
+def _disk_reserve(u: Any) -> int:
+    """Bytes to treat as reserved (excluded from free_effective). Fixed floor + optional % of volume."""
     fixed = int(os.environ.get("DISK_RESERVE_BYTES", str(512 * 1024 * 1024)))
     pct = float(os.environ.get("DISK_RESERVE_PERCENT", "1.0"))
     return max(fixed, int(u.total * pct / 100.0))
