@@ -1,5 +1,9 @@
 FROM python:3.12-slim-bookworm
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends qbittorrent-nox \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd -r -m -u 10001 weedr
 
 WORKDIR /app

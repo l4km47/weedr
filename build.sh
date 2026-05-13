@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Python deps, detect aria2, create .env with secrets if missing, start PM2 on port 8000.
+# Install Python deps, detect qbittorrent-nox, create .env with secrets if missing, start PM2 on port 8000.
 # Optional env knobs (zip SQLite, health deep checks, IP allowlist, signed file URLs, audit, webhooks,
 # RSS): see .env.example and DEPLOYMENT.md. Docker: docker-compose.yml + Dockerfile.
 #
@@ -25,24 +25,22 @@ if ! command -v openssl >/dev/null 2>&1; then
   die "openssl not found (needed to generate secrets)."
 fi
 
-# --- aria2: resolve binary path for ARIA2_BIN ------------------------------
-ARIA2_BIN=""
-if [[ -n "${ARIA2_BIN_OVERRIDE:-}" ]]; then
-  ARIA2_BIN="$ARIA2_BIN_OVERRIDE"
-elif command -v aria2c >/dev/null 2>&1; then
-  ARIA2_BIN="$(command -v aria2c)"
-elif [[ -x /usr/local/bin/aria2c ]]; then
-  ARIA2_BIN="/usr/local/bin/aria2c"
-elif [[ -x /usr/bin/aria2c ]]; then
-  ARIA2_BIN="/usr/bin/aria2c"
-elif [[ -x "$HOME/.local/bin/aria2c" ]]; then
-  ARIA2_BIN="$HOME/.local/bin/aria2c"
+# --- qBittorrent-nox (BitTorrent engine) -----------------------------------
+QBT_BIN=""
+if [[ -n "${QBITTORRENT_BIN_OVERRIDE:-}" ]]; then
+  QBT_BIN="$QBITTORRENT_BIN_OVERRIDE"
+elif command -v qbittorrent-nox >/dev/null 2>&1; then
+  QBT_BIN="$(command -v qbittorrent-nox)"
+elif [[ -x /usr/bin/qbittorrent-nox ]]; then
+  QBT_BIN="/usr/bin/qbittorrent-nox"
+elif [[ -x /usr/local/bin/qbittorrent-nox ]]; then
+  QBT_BIN="/usr/local/bin/qbittorrent-nox"
 fi
 
-if [[ -z "$ARIA2_BIN" || ! -x "$ARIA2_BIN" ]]; then
-  die "aria2c not found. Install aria2 (e.g. sudo apt-get install -y aria2) or set ARIA2_BIN_OVERRIDE."
+if [[ -z "$QBT_BIN" || ! -x "$QBT_BIN" ]]; then
+  die "qbittorrent-nox not found. Install qbittorrent-nox or set QBITTORRENT_BIN_OVERRIDE."
 fi
-info "Using aria2 at: $ARIA2_BIN"
+info "Using qBittorrent at: $QBT_BIN"
 
 # --- venv + Python dependencies -------------------------------------------
 info "Creating venv with $PYTHON_BIN …"
@@ -64,7 +62,6 @@ if [[ ! -f "$ENV_FILE" ]]; then
 
 SECRET_KEY=${SECRET_KEY}
 DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
-ARIA2_BIN=${ARIA2_BIN}
 DOWNLOAD_DIR=${HOME}/torrents
 HOST=0.0.0.0
 PORT=8000
@@ -72,28 +69,17 @@ FLASK_DEBUG=0
 SESSION_COOKIE_SECURE=0
 SESSION_HOURS=10
 
-# --- aria2 tuning (optimised for 10 Gbps) ---
-ARIA2_MAX_CONCURRENT=20
-ARIA2_MAX_CONNECTION_PER_SERVER=16
-ARIA2_SPLIT=128
-ARIA2_MIN_SPLIT_SIZE=512K
-ARIA2_BT_MAX_PEERS=500
-ARIA2_BT_MAX_OPEN_FILES=1000
-ARIA2_DISK_CACHE=2000MB
-ARIA2_FILE_ALLOCATION=falloc
-ARIA2_BT_ENABLE_LPD=1
-ARIA2_LISTEN_PORT=6881-6999
-ARIA2_DHT_LISTEN_PORT=6881-6999
-ARIA2_BT_FORCE_ENCRYPTION=1
+# --- qBittorrent (managed by the app when QBITTORRENT_URL is unset) ----------
+QBITTORRENT_AUTO_START=1
+QBITTORRENT_STATE_DIR=${HOME}/.cache/torrent-server
+QBITTORRENT_BYPASS_LOCAL_AUTH=1
+# Optional fixed WebUI port for auto-spawned daemon (otherwise an ephemeral localhost port is chosen).
+# QBITTORRENT_WEBUI_PORT=8080
+# Per-torrent rate limits use the same env names as the old aria2 build for compatibility:
 ARIA2_MAX_UPLOAD_LIMIT=0
 ARIA2_MAX_DOWNLOAD_LIMIT=0
 ARIA2_SEED_TIME=0
 ARIA2_SEED_RATIO=0
-ARIA2_OPTIMIZE_CONCURRENT_DOWNLOADS=true
-ARIA2_BT_REQUEST_PEER_SPEED_LIMIT=100M
-ARIA2_PIECE_LENGTH=8M
-ARIA2_ASYNC_DNS=true
-ARIA2_ASYNC_DNS_SERVER=1.1.1.1,8.8.8.8
 RATELIMIT_STORAGE_URI=memory://
 
 # --- Optional (defaults shown; uncomment to enable / override) ---
@@ -122,9 +108,13 @@ EOF
   info "Created $ENV_FILE"
 else
   info "keeping existing $ENV_FILE"
-  if ! grep -q '^ARIA2_BIN=' "$ENV_FILE"; then
-    printf '\nARIA2_BIN=%s\n' "$ARIA2_BIN" >> "$ENV_FILE"
-    info "appended ARIA2_BIN"
+  if ! grep -q '^QBITTORRENT_STATE_DIR=' "$ENV_FILE"; then
+    echo "QBITTORRENT_STATE_DIR=${HOME}/.cache/torrent-server" >> "$ENV_FILE"
+    info "appended QBITTORRENT_STATE_DIR"
+  fi
+  if ! grep -q '^QBITTORRENT_AUTO_START=' "$ENV_FILE"; then
+    echo "QBITTORRENT_AUTO_START=1" >> "$ENV_FILE"
+    info "appended QBITTORRENT_AUTO_START"
   fi
   if ! grep -q '^PORT=' "$ENV_FILE"; then
     echo "PORT=8000" >> "$ENV_FILE"
@@ -141,20 +131,11 @@ else
     echo "ARIA2_SEED_RATIO=0" >> "$ENV_FILE"
     info "appended ARIA2_SEED_RATIO=0"
   fi
-  # --- 10G tuning: append missing high-throughput knobs --------------------
+  # --- 10G tuning: append missing knobs (rate limits; optional tracker override) ---
   declare -A NEW_VARS=(
-    [ARIA2_MAX_CONCURRENT]=20
-    [ARIA2_MAX_CONNECTION_PER_SERVER]=16
-    [ARIA2_SPLIT]=128
-    [ARIA2_MIN_SPLIT_SIZE]=512K
-    [ARIA2_BT_MAX_PEERS]=500
-    [ARIA2_BT_MAX_OPEN_FILES]=1000
-    [ARIA2_DISK_CACHE]=2G
-    [ARIA2_OPTIMIZE_CONCURRENT_DOWNLOADS]=true
-    [ARIA2_BT_REQUEST_PEER_SPEED_LIMIT]=100M
-    [ARIA2_PIECE_LENGTH]=8M
-    [ARIA2_ASYNC_DNS]=true
-    [ARIA2_ASYNC_DNS_SERVER]="1.1.1.1,8.8.8.8"
+    [ARIA2_MAX_UPLOAD_LIMIT]=0
+    [ARIA2_MAX_DOWNLOAD_LIMIT]=0
+    [QBITTORRENT_BYPASS_LOCAL_AUTH]=1
   )
   for KEY in "${!NEW_VARS[@]}"; do
     if ! grep -q "^${KEY}=" "$ENV_FILE"; then
@@ -186,7 +167,7 @@ else
 # RSS_MAX_MAGNETS_PER_POLL=5
 # RSS_PARENT_SUBDIR=
 # RSS_STATE_DB=
-# (aria2 tuning defaults are in .env.example — ARIA2_MAX_CONCURRENT, ARIA2_DHT_LISTEN_PORT, …)
+# (qBittorrent / rate-limit envs: see .env.example — QBITTORRENT_*, ARIA2_MAX_* for per-torrent caps)
 OPTIONAL_EOF
     info "appended optional-var comments (see .env.example)"
   fi

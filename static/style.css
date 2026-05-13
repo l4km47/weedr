@@ -1108,7 +1108,8 @@ pre.log {
   text-align: center;
 }
 
-.aria2-global-pre {
+.aria2-global-pre,
+.torrent-global-pre {
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 360px;

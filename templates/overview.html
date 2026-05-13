@@ -17,13 +17,13 @@
     </div>
   </section>
 
-  <section class="card-pro" id="aria2-global-card">
+  <section class="card-pro" id="torrent-global-card">
     <div class="card-head card-head-row">
-      <h2 class="card-title">aria2</h2>
+      <h2 class="card-title">qBittorrent</h2>
       <span class="muted small">Global options &amp; stats</span>
     </div>
     <div class="card-body">
-      <pre id="aria2-global-body" class="aria2-global-pre muted small">Loading…</pre>
+      <pre id="torrent-global-body" class="torrent-global-pre muted small">Loading…</pre>
     </div>
   </section>
 
@@ -44,7 +44,7 @@
   const diskStats = document.getElementById('disk-stats');
   const diskBar = document.getElementById('disk-bar');
   const activityPreview = document.getElementById('activity-preview');
-  const aria2Global = document.getElementById('aria2-global-body');
+  const torrentGlobal = document.getElementById('torrent-global-body');
 
   function esc(s) {
     const d = document.createElement('div');
@@ -99,14 +99,14 @@
     } catch (_) {}
   }
 
-  function fmtAria2Global(data) {
+  function fmtTorrentGlobal(data) {
     if (!data) return 'No data';
     var lines = [];
     var wrap = data.global_stat || {};
     var gs = wrap.global || {};
-    var go = data.global_option || {};
-    if (data.aria2_version) {
-      lines.push('version: ' + JSON.stringify(data.aria2_version));
+    var go = data.torrent_options || data.global_option || {};
+    if (data.torrent_client_version) {
+      lines.push('qBittorrent version: ' + JSON.stringify(data.torrent_client_version));
     }
     if (wrap.version) {
       lines.push('version (rpc): ' + String(wrap.version));
@@ -116,7 +116,7 @@
         lines.push('stat ' + k + ': ' + JSON.stringify(gs[k]));
       });
     }
-    lines.push('— global options —');
+    lines.push('— preferences snapshot —');
     if (go && typeof go === 'object') {
       var keys = Object.keys(go).sort();
       keys.slice(0, 32).forEach(function (k) {
@@ -127,16 +127,16 @@
     return lines.join('\n');
   }
 
-  async function pollAria2() {
-    if (!aria2Global) return;
+  async function pollTorrentGlobal() {
+    if (!torrentGlobal) return;
     try {
-      const res = await fetch('{{ url_for("api_aria2_global") }}');
+      const res = await fetch('{{ url_for("api_torrent_global") }}');
       if (!res.ok) {
-        aria2Global.textContent = 'Unavailable (' + res.status + ')';
+        torrentGlobal.textContent = 'Unavailable (' + res.status + ')';
         return;
       }
       const data = await res.json();
-      aria2Global.textContent = fmtAria2Global(data);
+      torrentGlobal.textContent = fmtTorrentGlobal(data);
     } catch (_) {}
   }
 
@@ -144,8 +144,8 @@
   setInterval(pollDisk, 8000);
   pollActivity();
   setInterval(pollActivity, 3000);
-  pollAria2();
-  setInterval(pollAria2, 10000);
+  pollTorrentGlobal();
+  setInterval(pollTorrentGlobal, 10000);
 })();
 </script>
 {% endblock %}

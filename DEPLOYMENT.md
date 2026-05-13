@@ -38,3 +38,5 @@ Use this when exposing **weedr** beyond localhost.
 3. Ensure host firewall only exposes the proxy port you intend.
 
 The image runs as a non-root user; mounted volumes must be writable by that UID or use named volumes as in `docker-compose.yml`.
+
+BitTorrent uses **qBittorrent-nox** inside the container. Persist `QBITTORRENT_STATE_DIR` (see `docker-compose.yml`) so resume data survives restarts.

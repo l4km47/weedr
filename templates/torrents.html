@@ -385,7 +385,7 @@
     try {
       const res = await apiFetch(detailApiUrl(selectedGid));
       if (res.status === 404) {
-        detailErr.textContent = 'This download is no longer in aria2.';
+        detailErr.textContent = 'This download is no longer in qBittorrent.';
         detailErr.classList.remove('hidden');
         selectedGid = null;
         renderTorrentList();
@@ -504,7 +504,7 @@
       const box = document.getElementById('detail-del-files');
       const delFiles = box && box.checked;
       const q = delFiles ? '?delete_files=1' : '';
-      if (!confirm('Remove this torrent from aria2?' + (delFiles ? ' Files on disk will be deleted.' : ''))) return;
+      if (!confirm('Remove this torrent from qBittorrent?' + (delFiles ? ' Files on disk will be deleted.' : ''))) return;
       const res = await apiFetch('/api/torrents/' + encodeURIComponent(gid) + q, {
         method: 'DELETE',
         headers: headersJson(),
@@ -542,7 +542,7 @@
   });
 
   document.getElementById('purge-stopped').addEventListener('click', async function () {
-    if (!confirm('Purge stopped download results from aria2?')) return;
+    if (!confirm('Remove completed torrents from the client list (files on disk are kept)?')) return;
     await apiFetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
     pollTorrents();
   });

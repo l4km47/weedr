@@ -1,5 +1,5 @@
 """
-Torrent dashboard: aria2 RPC (Python-backed), concurrent downloads, live stats,
+Torrent dashboard: qBittorrent-nox Web API for BitTorrent, concurrent downloads, live stats,
 file management, hardened authentication (Argon2, CSRF, secure cookies, rate limits).
 """
 
@@ -38,15 +38,13 @@ from flask_limiter import Limiter
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash
 
-from aria2_service import (
-    Aria2RPCError,
-    aria2_throughput_rpc_options,
-    fetch_all_downloads,
-    fetch_download_detail,
-    get_service,
-    global_stat,
+from magnet_util import auto_subfolder_name, btih_info_hash_v1_hex, parse_magnet, pick_unique_dir
+from qbittorrent_service import (
+    QBittorrentError,
+    get_service as get_qbittorrent_service,
+    qbt_global_options_snapshot,
+    throughput_limits_bps,
 )
-from magnet_util import auto_subfolder_name, parse_magnet, pick_unique_dir
 from pathutil import safe_under_root
 from range_file_serve import range_file_download_response
 from zip_jobs_store import ZipJobsStore
@@ -487,7 +485,7 @@ def _apply_zip_retention() -> None:
 
 
 def _torrent_fire_notifications(data: dict[str, list[dict[str, Any]]]) -> None:
-    """Detect transitions into terminal aria2 states and emit webhooks / audit."""
+    """Detect transitions into terminal torrent states and emit webhooks / audit."""
     global _torrent_status_prev
     terminal = frozenset({"complete", "error"})
     flat: list[dict[str, Any]] = []
@@ -586,8 +584,8 @@ def create_app() -> Flask:
     def require_auth() -> bool:
         return session.get("auth") is True
 
-    def ensure_aria2():
-        svc = get_service(DOWNLOAD_DIR)
+    def ensure_qbittorrent():
+        svc = get_qbittorrent_service(DOWNLOAD_DIR)
         svc.ensure_daemon()
         return svc
 
@@ -680,10 +678,10 @@ def create_app() -> Flask:
             checks["zip_storage_dir"] = str(e)
             ok = False
         try:
-            ensure_aria2().call("aria2.getVersion", [])
-            checks["aria2"] = "ok"
+            ensure_qbittorrent().app_version()
+            checks["qbittorrent"] = "ok"
         except Exception as e:
-            checks["aria2"] = str(e)
+            checks["qbittorrent"] = str(e)
             ok = False
         return {"ok": ok, "checks": checks}
 
@@ -850,31 +848,37 @@ def create_app() -> Flask:
         folder_label = auto_subfolder_name(parsed.get("dn"), str(parsed["btih"]))
         final_dir = pick_unique_dir(base, folder_label)
 
-        options: dict[str, Any] = {
-            "dir": str(final_dir),
-            "seed-time": os.environ.get("ARIA2_SEED_TIME", "0"),
-            "seed-ratio": os.environ.get("ARIA2_SEED_RATIO", "0"),
-            **aria2_throughput_rpc_options(),
-        }
-
         try:
-            svc = ensure_aria2()
-            gid = svc.call("aria2.addUri", [[magnet], options])
-        except Aria2RPCError as e:
+            ih = btih_info_hash_v1_hex(str(parsed["btih"]))
+        except ValueError as e:
+            return {"error": str(e)}, 400
+
+        dl_bps, ul_bps = throughput_limits_bps()
+        try:
+            svc = ensure_qbittorrent()
+            svc.add_magnet(magnet, final_dir, dl_limit_bps=dl_bps, up_limit_bps=ul_bps)
+            if svc.wait_for_torrent(ih, timeout=90.0):
+                svc.add_extra_trackers(ih)
+            else:
+                try:
+                    svc.add_extra_trackers(ih)
+                except QBittorrentError:
+                    pass
+        except QBittorrentError as e:
             return {"error": str(e)}, 503
 
         rel_dir = str(final_dir.relative_to(DOWNLOAD_DIR)).replace("\\", "/")
-        return {"ok": True, "gid": gid, "save_folder": rel_dir}, 200
+        return {"ok": True, "gid": ih, "save_folder": rel_dir}, 200
 
     @app.route("/api/torrents", methods=["GET"])
     @limiter.limit("120 per minute")
     def api_torrents_list():
         _auth_json()
         try:
-            svc = ensure_aria2()
-            data = fetch_all_downloads(svc)
-            gs = global_stat(svc)
-        except Aria2RPCError as e:
+            svc = ensure_qbittorrent()
+            data = svc.fetch_all_downloads()
+            gs = svc.global_stat()
+        except QBittorrentError as e:
             return jsonify({"error": str(e)}), 503
         _torrent_fire_notifications(data)
         return jsonify({"downloads": data, "meta": gs})
@@ -888,9 +892,9 @@ def create_app() -> Flask:
         if not gid:
             return jsonify({"error": "Invalid gid"}), 400
         try:
-            svc = ensure_aria2()
-            detail = fetch_download_detail(svc, gid)
-        except Aria2RPCError as e:
+            svc = ensure_qbittorrent()
+            detail = svc.fetch_download_detail(gid)
+        except QBittorrentError as e:
             return jsonify({"error": str(e)}), 503
         if detail is None:
             return jsonify({"error": "Not found"}), 404
@@ -965,8 +969,8 @@ def create_app() -> Flask:
     def api_torrent_pause(gid: str):
         _auth_json()
         try:
-            ensure_aria2().call("aria2.pause", [gid])
-        except Aria2RPCError as e:
+            ensure_qbittorrent().pause(gid)
+        except QBittorrentError as e:
             return jsonify({"error": str(e)}), 400
         return jsonify({"ok": True})
 
@@ -974,8 +978,8 @@ def create_app() -> Flask:
     def api_torrent_resume(gid: str):
         _auth_json()
         try:
-            ensure_aria2().call("aria2.unpause", [gid])
-        except Aria2RPCError as e:
+            ensure_qbittorrent().resume(gid)
+        except QBittorrentError as e:
             return jsonify({"error": str(e)}), 400
         return jsonify({"ok": True})
 
@@ -983,8 +987,8 @@ def create_app() -> Flask:
     def api_torrent_prioritize(gid: str):
         _auth_json()
         try:
-            ensure_aria2().call("aria2.changePosition", [gid, 0, "POS_SET"])
-        except Aria2RPCError as e:
+            ensure_qbittorrent().top_priority(gid)
+        except QBittorrentError as e:
             return jsonify({"error": str(e)}), 400
         return jsonify({"ok": True})
 
@@ -1006,8 +1010,8 @@ def create_app() -> Flask:
         if not filtered:
             return jsonify({"error": f"Only these keys allowed: {sorted(allowed)}"}), 400
         try:
-            ensure_aria2().call("aria2.changeOption", [gid, filtered])
-        except Aria2RPCError as e:
+            ensure_qbittorrent().set_torrent_options(gid, filtered)
+        except QBittorrentError as e:
             return jsonify({"error": str(e)}), 400
         return jsonify({"ok": True})
 
@@ -1015,47 +1019,10 @@ def create_app() -> Flask:
     def api_torrent_remove(gid: str):
         _auth_json()
         delete_files = request.args.get("delete_files", "0") in ("1", "true", "yes")
-        svc = ensure_aria2()
-        paths_to_delete: list[Path] = []
-        if delete_files:
-            try:
-                raw = svc.call(
-                    "aria2.tellStatus",
-                    [
-                        gid,
-                        ["files", "dir", "status"],
-                    ],
-                )
-                if isinstance(raw, dict):
-                    d = raw.get("dir") or str(DOWNLOAD_DIR)
-                    base = Path(d).resolve()
-                    for f in raw.get("files") or []:
-                        if not isinstance(f, dict):
-                            continue
-                        rel_p = f.get("path")
-                        if not rel_p:
-                            continue
-                        full = safe_under_root(DOWNLOAD_DIR, (base / rel_p).resolve())
-                        if full:
-                            paths_to_delete.append(full)
-            except Aria2RPCError:
-                pass
         try:
-            svc.call("aria2.remove", [gid])
-        except Aria2RPCError:
-            try:
-                svc.call("aria2.removeDownloadResult", [gid])
-            except Aria2RPCError as e:
-                return jsonify({"error": str(e)}), 400
-        if delete_files:
-            for p in paths_to_delete:
-                try:
-                    if p.is_dir():
-                        shutil.rmtree(p)
-                    elif p.is_file():
-                        p.unlink()
-                except OSError as e:
-                    app.logger.warning("Could not delete %s: %s", p, e)
+            ensure_qbittorrent().delete(gid, delete_files=delete_files)
+        except QBittorrentError as e:
+            return jsonify({"error": str(e)}), 400
         _audit("torrent_remove", gid=gid, delete_files=delete_files)
         _notify_webhook("torrent_remove", {"gid": gid, "delete_files": delete_files})
         return jsonify({"ok": True})
@@ -1064,8 +1031,8 @@ def create_app() -> Flask:
     def api_purge_stopped():
         _auth_json()
         try:
-            ensure_aria2().call("aria2.purgeDownloadResult")
-        except Aria2RPCError as e:
+            ensure_qbittorrent().purge_finished()
+        except QBittorrentError as e:
             return jsonify({"error": str(e)}), 400
         return jsonify({"ok": True})
 
@@ -1110,18 +1077,27 @@ def create_app() -> Flask:
         dl_url = url_for("download_file", rel_path=rel, token=token)
         return jsonify({"token": token, "download_url": dl_url})
 
+    @app.route("/api/torrent/global", methods=["GET"])
     @app.route("/api/aria2/global", methods=["GET"])
     @limiter.limit("60 per minute")
-    def api_aria2_global():
+    def api_torrent_global():
         _auth_json()
         try:
-            svc = ensure_aria2()
-            gs = global_stat(svc)
-            ver = svc.call("aria2.getVersion", [])
-            opts = svc.call("aria2.getGlobalOption", [])
-        except Aria2RPCError as e:
+            svc = ensure_qbittorrent()
+            gs = svc.global_stat()
+            prefs = qbt_global_options_snapshot(svc)
+        except QBittorrentError as e:
             return jsonify({"error": str(e)}), 503
-        return jsonify({"global_stat": gs, "aria2_version": ver, "global_option": opts})
+        return jsonify(
+            {
+                "global_stat": gs,
+                "torrent_client": "qBittorrent",
+                "torrent_client_version": gs.get("version"),
+                "torrent_options": prefs,
+                "aria2_version": None,
+                "global_option": prefs,
+            }
+        )
 
     @app.route("/api/fs/zip/start", methods=["POST"])
     @limiter.limit("12 per minute")

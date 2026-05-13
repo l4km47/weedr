@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
 from pathlib import Path
@@ -34,6 +35,23 @@ def parse_magnet(uri: str) -> dict[str, str | int | None]:
             xl = None
 
     return {"btih": btih, "dn": dn if dn else None, "xl": xl}
+
+
+def btih_info_hash_v1_hex(btih: str) -> str:
+    """
+    Normalize magnet xt=urn:btih value to 40-char lowercase hex (v1 info-hash).
+    Accepts hex (40) or base32 (32) forms.
+    """
+    b = (btih or "").strip().lower()
+    if len(b) == 40 and all(c in "0123456789abcdef" for c in b):
+        return b
+    if len(b) == 32:
+        pad = (8 - len(b) % 8) % 8
+        raw = base64.b32decode(b.upper() + ("=" * pad), casefold=True)
+        if len(raw) != 20:
+            raise ValueError("Invalid base32 btih length")
+        return raw.hex()
+    raise ValueError("Unsupported btih format (expected 40 hex or 32 base32 chars)")
 
 
 def auto_subfolder_name(dn: str | None, btih: str) -> str:
