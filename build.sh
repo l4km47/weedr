@@ -290,10 +290,42 @@ info "  net.core.netdev_max_backlog=30000"
 info "  and ulimit -n 1048576 for the process user."
 info "  Add to /etc/sysctl.conf + run: sudo sysctl -p"
 
+# Stop leftover qbittorrent-nox daemons (frees WebUI port / profile before PM2 restarts weedr).
+# Uses ps aux + PID column; grep '[q]bittorrent-nox' avoids matching this grep line.
+kill_stale_qbittorrent_nox() {
+  if ! command -v ps >/dev/null 2>&1; then
+    return 0
+  fi
+  local pid
+  # shellcheck disable=SC2009
+  for pid in $(ps aux 2>/dev/null | grep '[q]bittorrent-nox' | awk '{print $2}' | sort -u); do
+    case "$pid" in
+      '' | *[!0-9]*) continue ;;
+    esac
+    if kill -0 "$pid" 2>/dev/null; then
+      info "Stopping qbittorrent-nox (pid $pid) …"
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+  # shellcheck disable=SC2009
+  for pid in $(ps aux 2>/dev/null | grep '[q]bittorrent-nox' | awk '{print $2}' | sort -u); do
+    case "$pid" in
+      '' | *[!0-9]*) continue ;;
+    esac
+    if kill -0 "$pid" 2>/dev/null; then
+      info "Force killing qbittorrent-nox (pid $pid) …"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
 # --- PM2 ------------------------------------------------------------------
 if ! command -v pm2 >/dev/null 2>&1; then
   die "pm2 not found. Install Node.js then: npm install -g pm2"
 fi
+
+kill_stale_qbittorrent_nox
 
 pm2 delete weedr >/dev/null 2>&1 || true
 pm2 start "$ROOT/run.sh" --name weedr --time --interpreter bash

@@ -1441,3 +1441,62 @@ body.theme-light .file-progress-wrap {
     max-height: 42vh;
   }
 }
+
+/* App modal (transfers & shared patterns) */
+.app-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+}
+
+.app-modal.hidden {
+  display: none;
+}
+
+.app-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 6, 15, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.app-modal-panel {
+  position: relative;
+  z-index: 1;
+  width: min(420px, 100%);
+  max-height: min(80vh, 480px);
+  overflow: auto;
+  padding: 1.35rem 1.5rem;
+  margin: 0;
+}
+
+.app-modal-title {
+  margin: 0 0 0.65rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.app-modal-body {
+  margin: 0 0 1.15rem;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.app-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+body.theme-light .app-modal-backdrop {
+  background: rgba(15, 23, 42, 0.45);
+}

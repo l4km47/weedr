@@ -78,6 +78,18 @@
   </section>
 </main>
 
+<div id="app-modal" class="app-modal hidden" aria-hidden="true">
+  <div class="app-modal-backdrop" data-app-modal-dismiss tabindex="-1"></div>
+  <div class="app-modal-panel card" role="dialog" aria-modal="true" aria-labelledby="app-modal-title">
+    <h2 id="app-modal-title" class="app-modal-title">—</h2>
+    <p id="app-modal-body" class="app-modal-body muted"></p>
+    <div class="app-modal-actions" id="app-modal-actions">
+      <button type="button" class="btn ghost btn-sm" id="app-modal-cancel">Cancel</button>
+      <button type="button" class="btn primary btn-sm" id="app-modal-ok">OK</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function () {
   const csrfMeta = document.querySelector('meta[name="csrf-token"]');
@@ -88,6 +100,84 @@
   }
   function apiFetch(url, init) {
     return fetch(url, Object.assign({ credentials: 'same-origin' }, init || {}));
+  }
+
+  var appModalRoot = document.getElementById('app-modal');
+  var appModalTitle = document.getElementById('app-modal-title');
+  var appModalBody = document.getElementById('app-modal-body');
+  var appModalOk = document.getElementById('app-modal-ok');
+  var appModalCancel = document.getElementById('app-modal-cancel');
+  var appModalBackdrop = appModalRoot ? appModalRoot.querySelector('[data-app-modal-dismiss]') : null;
+  var appModalResolve = null;
+  var appModalKeyHandler = null;
+
+  function closeAppModal(result) {
+    if (!appModalRoot) return;
+    appModalRoot.classList.add('hidden');
+    appModalRoot.setAttribute('aria-hidden', 'true');
+    if (appModalKeyHandler) {
+      document.removeEventListener('keydown', appModalKeyHandler);
+      appModalKeyHandler = null;
+    }
+    var fn = appModalResolve;
+    appModalResolve = null;
+    if (fn) fn(result);
+  }
+
+  function openAppModal(opts) {
+    opts = opts || {};
+    return new Promise(function (resolve) {
+      if (!appModalRoot || !appModalTitle || !appModalBody || !appModalOk) {
+        resolve(false);
+        return;
+      }
+      appModalResolve = resolve;
+      appModalTitle.textContent = opts.title || 'Notice';
+      appModalBody.textContent = opts.message || '';
+      appModalOk.textContent = opts.confirmLabel || 'OK';
+      var showCancel = opts.cancelLabel != null && opts.cancelLabel !== '';
+      if (appModalCancel) {
+        appModalCancel.classList.toggle('hidden', !showCancel);
+        if (showCancel) appModalCancel.textContent = opts.cancelLabel;
+      }
+      appModalRoot.classList.remove('hidden');
+      appModalRoot.setAttribute('aria-hidden', 'false');
+      appModalKeyHandler = function (ev) {
+        if (ev.key === 'Escape') {
+          ev.preventDefault();
+          closeAppModal(false);
+        }
+      };
+      document.addEventListener('keydown', appModalKeyHandler);
+      setTimeout(function () {
+        try {
+          (showCancel ? appModalCancel : appModalOk).focus();
+        } catch (_) {}
+      }, 10);
+    });
+  }
+
+  function modalAlert(message, title) {
+    return openAppModal({ title: title || 'Error', message: message || '', cancelLabel: null }).catch(function () {});
+  }
+
+  function modalConfirm(message, title, confirmLabel, cancelLabel) {
+    return openAppModal({
+      title: title || 'Confirm',
+      message: message || '',
+      confirmLabel: confirmLabel || 'OK',
+      cancelLabel: cancelLabel != null ? cancelLabel : 'Cancel',
+    });
+  }
+
+  if (appModalOk) {
+    appModalOk.addEventListener('click', function () { closeAppModal(true); });
+  }
+  if (appModalCancel) {
+    appModalCancel.addEventListener('click', function () { closeAppModal(false); });
+  }
+  if (appModalBackdrop) {
+    appModalBackdrop.addEventListener('click', function () { closeAppModal(false); });
   }
 
   const listMount = document.getElementById('torrent-list-mount');
@@ -110,7 +200,16 @@
   const shell = document.getElementById('transfers-shell');
   const DETAIL_URL_TEMPLATE = {{ url_for('api_torrent_detail', gid='__GID_PLACEHOLDER__') | tojson }};
   const TORRENTS_ADD_URL = {{ url_for('api_torrents_add') | tojson }};
+  const TORRENT_OPTIONS_URL_TEMPLATE = {{ url_for('api_torrent_options', gid='__GID_PLACEHOLDER__') | tojson }};
+  const TORRENT_PRIORITIZE_URL_TEMPLATE = {{ url_for('api_torrent_prioritize', gid='__GID_PLACEHOLDER__') | tojson }};
+  const TORRENT_PAUSE_URL_TEMPLATE = {{ url_for('api_torrent_pause', gid='__GID_PLACEHOLDER__') | tojson }};
+  const TORRENT_RESUME_URL_TEMPLATE = {{ url_for('api_torrent_resume', gid='__GID_PLACEHOLDER__') | tojson }};
+  const TORRENT_DELETE_URL_TEMPLATE = {{ url_for('api_torrent_remove', gid='__GID_PLACEHOLDER__') | tojson }};
   const torrentFileInput = document.getElementById('torrent-file-input');
+
+  function torrentActionUrl(template, gid) {
+    return template.replace('__GID_PLACEHOLDER__', encodeURIComponent(gid));
+  }
 
   let lastDownloads = null;
   let selectedGid = null;
@@ -506,14 +605,14 @@
         const v = inp.value.trim();
         if (v) opts[k] = v;
       });
-      const res = await apiFetch('/api/torrents/' + encodeURIComponent(gid) + '/options', {
+      const res = await apiFetch(torrentActionUrl(TORRENT_OPTIONS_URL_TEMPLATE, gid), {
         method: 'POST',
         headers: headersJson(),
         body: JSON.stringify({ options: opts }),
       });
       if (!res.ok) {
         const err = await res.json().catch(function () { return {}; });
-        alert(err.error || res.statusText);
+        await modalAlert(err.error || res.statusText, 'Could not apply options');
         return;
       }
       detailOptsGridBoundGid = null;
@@ -532,14 +631,20 @@
       const box = document.getElementById('detail-del-files');
       const delFiles = box && box.checked;
       const q = delFiles ? '?delete_files=1' : '';
-      if (!confirm('Remove this torrent from qBittorrent?' + (delFiles ? ' Files on disk will be deleted.' : ''))) return;
-      const res = await apiFetch('/api/torrents/' + encodeURIComponent(gid) + q, {
+      var okRemove = await modalConfirm(
+        'Remove this torrent from qBittorrent?' + (delFiles ? ' Files on disk will be deleted.' : ''),
+        'Remove torrent',
+        'Remove',
+        'Cancel'
+      );
+      if (!okRemove) return;
+      const res = await apiFetch(torrentActionUrl(TORRENT_DELETE_URL_TEMPLATE, gid) + q, {
         method: 'DELETE',
         headers: headersJson(),
       });
       if (!res.ok) {
         const err = await res.json().catch(function () { return {}; });
-        alert(err.error || res.statusText);
+        await modalAlert(err.error || res.statusText, 'Could not remove');
         return;
       }
       if (selectedGid === gid) selectedGid = null;
@@ -547,33 +652,42 @@
       return;
     }
     if (act === 'prioritize') {
-      const res = await apiFetch('/api/torrents/' + encodeURIComponent(gid) + '/prioritize', {
+      const res = await apiFetch(torrentActionUrl(TORRENT_PRIORITIZE_URL_TEMPLATE, gid), {
         method: 'POST',
         headers: headersJson(),
       });
       if (!res.ok) {
         const err = await res.json().catch(function () { return {}; });
-        alert(err.error || res.statusText);
+        await modalAlert(err.error || res.statusText, 'Could not prioritize');
       }
       pollTorrents();
       return;
     }
     const path = act === 'pause'
-      ? '/api/torrents/' + encodeURIComponent(gid) + '/pause'
-      : '/api/torrents/' + encodeURIComponent(gid) + '/resume';
+      ? torrentActionUrl(TORRENT_PAUSE_URL_TEMPLATE, gid)
+      : torrentActionUrl(TORRENT_RESUME_URL_TEMPLATE, gid);
     const res = await apiFetch(path, { method: 'POST', headers: headersJson() });
     if (!res.ok) {
       const err = await res.json().catch(function () { return {}; });
-      alert(err.error || res.statusText);
+      await modalAlert(err.error || res.statusText, act === 'pause' ? 'Could not pause' : 'Could not resume');
     }
     pollTorrents();
   });
 
-  document.getElementById('purge-stopped').addEventListener('click', async function () {
-    if (!confirm('Remove completed torrents from the client list (files on disk are kept)?')) return;
-    await apiFetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
-    pollTorrents();
-  });
+  var purgeStoppedBtn = document.getElementById('purge-stopped');
+  if (purgeStoppedBtn) {
+    purgeStoppedBtn.addEventListener('click', async function () {
+      var okPurge = await modalConfirm(
+        'Remove completed torrents from the client list (files on disk are kept)?',
+        'Clear stopped history',
+        'Clear',
+        'Cancel'
+      );
+      if (!okPurge) return;
+      await apiFetch('{{ url_for("api_purge_stopped") }}', { method: 'POST', headers: headersJson() });
+      pollTorrents();
+    });
+  }
 
   function clearMagnetForm(form) {
     if (!form) return;
@@ -687,6 +801,8 @@
       }
     });
   }
+
+  if (filterInput) {
     filterInput.addEventListener('input', function () {
       if (lastDownloads) renderTorrentTables();
     });

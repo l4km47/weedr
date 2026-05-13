@@ -742,10 +742,26 @@ class QBittorrentService:
         return {"global": stats, "version": ver, "enabled_features": []}
 
     def pause(self, info_hash: str) -> None:
-        self._post("api/v2/torrents/pause", {"hashes": info_hash.lower()})
+        """qBittorrent 5+ uses torrents/stop; older releases use torrents/pause."""
+        h = info_hash.lower()
+        try:
+            self._post("api/v2/torrents/stop", {"hashes": h})
+        except QBittorrentError as e:
+            if "API not found" in str(e) and "torrents/stop" in str(e):
+                self._post("api/v2/torrents/pause", {"hashes": h})
+            else:
+                raise
 
     def resume(self, info_hash: str) -> None:
-        self._post("api/v2/torrents/resume", {"hashes": info_hash.lower()})
+        """qBittorrent 5+ uses torrents/start; older releases use torrents/resume."""
+        h = info_hash.lower()
+        try:
+            self._post("api/v2/torrents/start", {"hashes": h})
+        except QBittorrentError as e:
+            if "API not found" in str(e) and "torrents/start" in str(e):
+                self._post("api/v2/torrents/resume", {"hashes": h})
+            else:
+                raise
 
     def top_priority(self, info_hash: str) -> None:
         self._post("api/v2/torrents/topPrio", {"hashes": info_hash.lower()})
